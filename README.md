@@ -3,6 +3,8 @@
 原理可见 [ntrecall](https://napneko.github.io/other/ntrecall)
 
 ## 适配对象
+Windows QQ 9.9.19 35341 已测试
+
 Windows QQ 9.9.19 35184 已测试
 
 Windows QQ 9.9.19 34740 已测试
