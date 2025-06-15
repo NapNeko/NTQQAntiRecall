@@ -35,3 +35,6 @@ Windows QQ 9.9.19 34740 已测试
 代码为了快速迭代与方便 写法较为抽象
 
 此应用衍生自NapCatQQ周边设施
+
+## 交流群
+[NapCat #1](https://qm.qq.com/q/bo2K5fcmjY)
