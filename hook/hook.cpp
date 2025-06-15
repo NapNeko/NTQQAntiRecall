@@ -4,13 +4,154 @@
 #include <string>
 #include <atlstr.h>
 #include <iostream>
+#include <map>
+#include <memory>
+#include <algorithm>
+#include "funchook.h"
 
-BYTE jzCode[] = {0x0F, 0x86};
+// NAPI类型定义和常量
+typedef void *napi_env;
+typedef void *napi_value;
+typedef void *napi_callback_info;
+typedef void *napi_ref;
+typedef void *napi_threadsafe_function;
+typedef void *napi_callback;
 
-// 辅助函数 去除字符串中的所有空格
+typedef enum
+{
+    napi_ok,
+    napi_invalid_arg,
+    napi_object_expected,
+    napi_string_expected,
+    napi_name_expected,
+    napi_function_expected,
+    napi_number_expected,
+    napi_boolean_expected,
+    napi_array_expected,
+    napi_generic_failure,
+    napi_pending_exception,
+    napi_cancelled,
+    napi_escape_called_twice,
+    napi_handle_scope_mismatch,
+    napi_callback_scope_mismatch,
+    napi_queue_full,
+    napi_closing,
+    napi_bigint_expected,
+    napi_date_expected,
+    napi_arraybuffer_expected,
+    napi_detachable_arraybuffer_expected,
+    napi_would_deadlock
+} napi_status;
+
+typedef enum
+{
+    napi_tsfn_release,
+    napi_tsfn_abort
+} napi_threadsafe_function_release_mode;
+
+typedef enum
+{
+    napi_tsfn_nonblocking,
+    napi_tsfn_blocking
+} napi_threadsafe_function_call_mode;
+
+typedef void (*napi_finalize)(napi_env env, void *finalize_data, void *finalize_hint);
+typedef void (*napi_threadsafe_function_call_js)(napi_env env, napi_value js_callback, void *context, void *data);
+
+#define NAPI_AUTO_LENGTH SIZE_MAX
+
+// QQNT Windows 35341 关键RVA地址
+const DWORD add_local_gray_tip_rva = 0x1121B4E;
+const DWORD recall_grp_patch_rva = 0x25BF57F;
+const DWORD add_msg_listener_rva = 0x11133F4;
+const DWORD recall_grp_func_rva = 0x25BF4D3;
+
+// 全局变量
+napi_threadsafe_function tsfn_ptr = nullptr;
+napi_ref msgService_Js_This_Ref = nullptr;
+std::vector<void *> ref_ptr_array; // 内存管理
+HMODULE g_wrapperModule = nullptr;
+HMODULE g_qqntModule = nullptr;
+
+// NAPI函数指针定义
+typedef napi_status (*napi_create_threadsafe_function_func)(
+    napi_env env, napi_value func, napi_value async_resource,
+    napi_value async_resource_name, size_t max_queue_size,
+    size_t initial_thread_count, void *thread_finalize_data,
+    napi_finalize thread_finalize_cb, void *context,
+    napi_threadsafe_function_call_js call_js_cb,
+    napi_threadsafe_function *result);
+
+typedef napi_status (*napi_call_threadsafe_function_func)(
+    napi_threadsafe_function tsfn, void *data, napi_threadsafe_function_call_mode mode);
+
+typedef napi_status (*napi_get_cb_info_func)(
+    napi_env env, napi_callback_info info, size_t *argc,
+    napi_value *argv, napi_value *thisArg, void **data);
+
+typedef napi_status (*napi_create_object_func)(napi_env env, napi_value *result);
+typedef napi_status (*napi_create_string_utf8_func)(napi_env env, const char *str, size_t length, napi_value *result);
+typedef napi_status (*napi_create_int32_func)(napi_env env, int32_t value, napi_value *result);
+typedef napi_status (*napi_set_named_property_func)(napi_env env, napi_value object, const char *utf8name, napi_value value);
+typedef napi_status (*napi_get_boolean_func)(napi_env env, bool value, napi_value *result);
+typedef napi_status (*napi_call_function_func)(napi_env env, napi_value recv, napi_value func, size_t argc, const napi_value *argv, napi_value *result);
+typedef napi_status (*napi_create_function_func)(napi_env env, const char *utf8name, size_t length, napi_callback cb, void *data, napi_value *result);
+typedef napi_status (*napi_get_named_property_func)(napi_env env, napi_value object, const char *utf8name, napi_value *result);
+typedef napi_status (*napi_create_reference_func)(napi_env env, napi_value value, uint32_t initial_refcount, napi_ref *result);
+typedef napi_status (*napi_get_reference_value_func)(napi_env env, napi_ref ref, napi_value *result);
+typedef napi_status (*napi_get_global_func)(napi_env env, napi_value *result);
+typedef napi_status (*napi_get_value_string_utf8_func)(napi_env env, napi_value value, char *buf, size_t bufsize, size_t *result);
+
+// NAPI函数指针实例
+napi_create_threadsafe_function_func napi_create_threadsafe_function_ptr = nullptr;
+napi_call_threadsafe_function_func napi_call_threadsafe_function_ptr = nullptr;
+napi_get_cb_info_func napi_get_cb_info_ptr = nullptr;
+napi_create_object_func napi_create_object_ptr = nullptr;
+napi_create_string_utf8_func napi_create_string_utf8_ptr = nullptr;
+napi_create_int32_func napi_create_int32_ptr = nullptr;
+napi_set_named_property_func napi_set_named_property_ptr = nullptr;
+napi_get_boolean_func napi_get_boolean_ptr = nullptr;
+napi_call_function_func napi_call_function_ptr = nullptr;
+napi_create_function_func napi_create_function_ptr = nullptr;
+napi_get_named_property_func napi_get_named_property_ptr = nullptr;
+napi_create_reference_func napi_create_reference_ptr = nullptr;
+napi_get_reference_value_func napi_get_reference_value_ptr = nullptr;
+napi_get_global_func napi_get_global_ptr = nullptr;
+napi_get_value_string_utf8_func napi_get_value_string_utf8_ptr = nullptr;
+
+// 原始函数指针
+typedef void *(*add_msg_listener_func)(void *, void *, void *, void *);
+add_msg_listener_func original_add_msg_listener = nullptr;
+
+typedef void *(*recall_grp_func)(void *, void *, void *, void *, void *, void *, void *, void *);
+recall_grp_func original_recall_grp = nullptr;
+
+// 结构体定义
+struct CallbackData
+{
+    std::string peerUid;
+    std::string tipText;
+};
+
+// 获取栈指针的辅助函数 - 使用更安全的方式
+void *GetCurrentStackPointer()
+{
+    void *stackPtr = nullptr;
+#ifdef _M_X64
+    // 64位版本
+    stackPtr = _AddressOfReturnAddress();
+#elif defined(_M_IX86)
+    // 32位版本
+    __asm {
+        mov stackPtr, esp
+    }
+#endif
+    return stackPtr;
+}
+
+// 辅助函数
 std::string RemoveSpaces(const std::string &input)
 {
-
     std::string result;
     for (char c : input)
     {
@@ -22,7 +163,6 @@ std::string RemoveSpaces(const std::string &input)
     return result;
 }
 
-// 辅助函数 将十六进制字符串转换为字节模式
 std::vector<uint8_t> ParseHexPattern(const std::string &hexPattern)
 {
     std::string cleanedPattern = RemoveSpaces(hexPattern);
@@ -32,7 +172,7 @@ std::vector<uint8_t> ParseHexPattern(const std::string &hexPattern)
         std::string byteStr = cleanedPattern.substr(i, 2);
         if (byteStr == "??")
         {
-            pattern.push_back(0xCC); // 使用 0xCC 作为通配符
+            pattern.push_back(0xCC);
         }
         else
         {
@@ -43,7 +183,6 @@ std::vector<uint8_t> ParseHexPattern(const std::string &hexPattern)
     return pattern;
 }
 
-// 支持通配符
 bool MatchPatternWithWildcard(const uint8_t *data, const std::vector<uint8_t> &pattern)
 {
     for (size_t i = 0; i < pattern.size(); ++i)
@@ -64,20 +203,16 @@ uint64_t SearchRangeAddressInModule(HMODULE module, const std::string &hexPatter
     {
         return 0;
     }
-    // 解析十六进制字符串为字节模式
-    std::vector<uint8_t> pattern = ParseHexPattern(hexPattern);
 
-    // 在模块内存范围内搜索模式
+    std::vector<uint8_t> pattern = ParseHexPattern(hexPattern);
     uint8_t *base = static_cast<uint8_t *>(modInfo.lpBaseOfDll);
     uint8_t *searchStart = base + searchStartRVA;
     if (searchEndRVA == 0)
     {
-        // 如果留空表示搜索到结束
         searchEndRVA = modInfo.SizeOfImage;
     }
     uint8_t *searchEnd = base + searchEndRVA;
 
-    // 确保搜索范围有效
     if (searchStart >= base && searchEnd <= base + modInfo.SizeOfImage)
     {
         for (uint8_t *current = searchStart; current < searchEnd; ++current)
@@ -88,38 +223,379 @@ uint64_t SearchRangeAddressInModule(HMODULE module, const std::string &hexPatter
             }
         }
     }
-
     return 0;
 }
 
-bool hookRecall(HMODULE hModule)
+// 初始化NAPI函数指针
+bool InitializeNAPIFunctions()
 {
-    try
+    g_qqntModule = GetModuleHandleW(L"qqnt.dll");
+    if (!g_qqntModule)
     {
-        // mov     rdx, [rbp+2A0h+var_158]
-        // mov     r8, [rbp+2A0h+var_150]
-        // mov     rax, r8
-        // sub     rax, rdx
-        // cmp     rax, 7
-        // ja      loc_1825B3B11 -> jna loc_1825B3B11
-        std::string pattern = "48 8B 95 ?? ?? ?? ?? 4C 8B 85 ?? ?? ?? ?? 4C 89 C0 48 29 D0 48 83 F8 07 0F 87 ?? ?? ?? ??";
-        UINT64 address = SearchRangeAddressInModule(hModule, pattern);
-        address = address + 24;
-        DWORD OldProtect = 0;
-        VirtualProtect((LPVOID)address, 2, PAGE_EXECUTE_READWRITE, &OldProtect);
-        memcpy((LPVOID)address, jzCode, 2);
-        VirtualProtect((LPVOID)address, 2, OldProtect, &OldProtect);
+        std::wcout << L"[!] qqnt.dll not found" << std::endl;
+        return false;
+    }
+
+    napi_create_threadsafe_function_ptr = (napi_create_threadsafe_function_func)GetProcAddress(g_qqntModule, "napi_create_threadsafe_function");
+    napi_call_threadsafe_function_ptr = (napi_call_threadsafe_function_func)GetProcAddress(g_qqntModule, "napi_call_threadsafe_function");
+    napi_get_cb_info_ptr = (napi_get_cb_info_func)GetProcAddress(g_qqntModule, "napi_get_cb_info");
+    napi_create_object_ptr = (napi_create_object_func)GetProcAddress(g_qqntModule, "napi_create_object");
+    napi_create_string_utf8_ptr = (napi_create_string_utf8_func)GetProcAddress(g_qqntModule, "napi_create_string_utf8");
+    napi_create_int32_ptr = (napi_create_int32_func)GetProcAddress(g_qqntModule, "napi_create_int32");
+    napi_set_named_property_ptr = (napi_set_named_property_func)GetProcAddress(g_qqntModule, "napi_set_named_property");
+    napi_get_boolean_ptr = (napi_get_boolean_func)GetProcAddress(g_qqntModule, "napi_get_boolean");
+    napi_call_function_ptr = (napi_call_function_func)GetProcAddress(g_qqntModule, "napi_call_function");
+    napi_create_function_ptr = (napi_create_function_func)GetProcAddress(g_qqntModule, "napi_create_function");
+    napi_get_named_property_ptr = (napi_get_named_property_func)GetProcAddress(g_qqntModule, "napi_get_named_property");
+    napi_create_reference_ptr = (napi_create_reference_func)GetProcAddress(g_qqntModule, "napi_create_reference");
+    napi_get_reference_value_ptr = (napi_get_reference_value_func)GetProcAddress(g_qqntModule, "napi_get_reference_value");
+    napi_get_global_ptr = (napi_get_global_func)GetProcAddress(g_qqntModule, "napi_get_global");
+    napi_get_value_string_utf8_ptr = (napi_get_value_string_utf8_func)GetProcAddress(g_qqntModule, "napi_get_value_string_utf8");
+
+    return napi_create_threadsafe_function_ptr && napi_call_threadsafe_function_ptr &&
+           napi_get_cb_info_ptr && napi_create_object_ptr && napi_create_string_utf8_ptr;
+}
+
+// 调用添加灰色提示
+void CallAddGrayTip(const std::string &peerUid, const std::string &tipText)
+{
+    if (!tsfn_ptr)
+    {
+        std::wcout << L"[!] tsfn_ptr is null" << std::endl;
+        return;
+    }
+
+    // 创建回调数据
+    CallbackData *data = new CallbackData();
+    data->peerUid = peerUid;
+    data->tipText = tipText;
+    ref_ptr_array.push_back(data);
+
+    napi_status status = napi_call_threadsafe_function_ptr(tsfn_ptr, data, napi_tsfn_blocking);
+    if (status != napi_ok)
+    {
+        std::wcout << L"[!] napi_call_threadsafe_function failed: " << status << std::endl;
+        delete data;
+        // 从数组中移除
+        auto it = std::find(ref_ptr_array.begin(), ref_ptr_array.end(), data);
+        if (it != ref_ptr_array.end())
+        {
+            ref_ptr_array.erase(it);
+        }
+    }
+}
+
+// 线程安全函数JS回调
+void ThreadSafeFunctionCallback(napi_env env, napi_value js_callback, void *context, void *data)
+{
+    std::wcout << L"[+] ThreadSafeFunctionCallback called" << std::endl;
+
+    CallbackData *callbackData = static_cast<CallbackData *>(data);
+    std::string groupId = "819085771";
+    std::string tip_text = "Frida Hook QQNT By NapCat";
+
+    if (callbackData)
+    {
+        groupId = callbackData->peerUid;
+        tip_text = callbackData->tipText;
+
+        // 清理内存
+        auto it = std::find(ref_ptr_array.begin(), ref_ptr_array.end(), callbackData);
+        if (it != ref_ptr_array.end())
+        {
+            ref_ptr_array.erase(it);
+        }
+        delete callbackData;
+    }
+
+    // 创建第一个对象参数 (peer info)
+    napi_value obj1;
+    napi_create_object_ptr(env, &obj1);
+
+    // chatType: 2
+    napi_value chatType;
+    napi_create_int32_ptr(env, 2, &chatType);
+    napi_set_named_property_ptr(env, obj1, "chatType", chatType);
+
+    // guildId: ""
+    napi_value guildId;
+    napi_create_string_utf8_ptr(env, "", 0, &guildId);
+    napi_set_named_property_ptr(env, obj1, "guildId", guildId);
+
+    // peerUid: groupId
+    napi_value peerUid;
+    napi_create_string_utf8_ptr(env, groupId.c_str(), groupId.length(), &peerUid);
+    napi_set_named_property_ptr(env, obj1, "peerUid", peerUid);
+
+    // 创建第二个对象参数 (tip info)
+    napi_value obj2;
+    napi_create_object_ptr(env, &obj2);
+
+    // busiId: 2201
+    napi_value busiId;
+    napi_create_int32_ptr(env, 2201, &busiId);
+    napi_set_named_property_ptr(env, obj2, "busiId", busiId);
+
+    // jsonStr
+    std::string jsonStr = R"({"align":"center","items":[{"txt":")" + tip_text + R"(","type":"nor"}]})";
+    napi_value jsonStrValue;
+    napi_create_string_utf8_ptr(env, jsonStr.c_str(), jsonStr.length(), &jsonStrValue);
+    napi_set_named_property_ptr(env, obj2, "jsonStr", jsonStrValue);
+
+    // recentAbstract
+    napi_value recentAbstract;
+    napi_create_string_utf8_ptr(env, tip_text.c_str(), tip_text.length(), &recentAbstract);
+    napi_set_named_property_ptr(env, obj2, "recentAbstract", recentAbstract);
+
+    // isServer: false
+    napi_value isServer;
+    napi_get_boolean_ptr(env, false, &isServer);
+    napi_set_named_property_ptr(env, obj2, "isServer", isServer);
+
+    // 创建两个bool参数
+    napi_value bool1, bool2;
+    napi_get_boolean_ptr(env, true, &bool1);
+    napi_get_boolean_ptr(env, true, &bool2);
+
+    // 创建native函数
+    napi_value native_func;
+    void *native_func_addr = (void *)((UINT_PTR)g_wrapperModule + add_local_gray_tip_rva);
+    napi_create_function_ptr(env, "nativeFunc", 10, (napi_callback)native_func_addr, nullptr, &native_func);
+
+    // 获取this对象
+    napi_value js_this;
+    napi_get_reference_value_ptr(env, msgService_Js_This_Ref, &js_this);
+
+    // 准备参数数组
+    napi_value argv[4] = {obj1, obj2, bool1, bool2};
+
+    // 调用函数
+    napi_value result;
+    napi_status call_status = napi_call_function_ptr(env, js_this, native_func, 4, argv, &result);
+
+    std::wcout << L"[*] napi_call_function status: " << call_status << std::endl;
+}
+
+// Hook消息监听器
+void *HookedAddMsgListener(void *arg1, void *arg2, void *arg3, void *arg4)
+{
+    std::wcout << L"[+] HookedAddMsgListener called" << std::endl;
+
+    napi_env env = (napi_env)arg1;
+    napi_callback_info info = (napi_callback_info)arg2;
+
+    // 获取this对象
+    napi_value this_arg;
+    napi_get_cb_info_ptr(env, info, nullptr, nullptr, &this_arg, nullptr);
+
+    // 创建this对象的引用
+    napi_status ref_status = napi_create_reference_ptr(env, this_arg, 1, &msgService_Js_This_Ref);
+    if (ref_status == napi_ok)
+    {
+        std::wcout << L"[+] msgService_Js_This_Ref created successfully" << std::endl;
+    }
+
+    // 创建线程安全函数
+    napi_value async_resource_name;
+    napi_create_string_utf8_ptr(env, "frida_tsfn", NAPI_AUTO_LENGTH, &async_resource_name);
+
+    napi_status status = napi_create_threadsafe_function_ptr(
+        env,
+        nullptr,                    // func: NULL
+        nullptr,                    // async_resource
+        async_resource_name,        // async_resource_name
+        0,                          // max_queue_size
+        1,                          // initial_thread_count
+        nullptr,                    // thread_finalize_data
+        nullptr,                    // thread_finalize_cb
+        nullptr,                    // context
+        ThreadSafeFunctionCallback, // call_js_cb
+        &tsfn_ptr);
+
+    if (status == napi_ok)
+    {
+        std::wcout << L"[+] Created ThreadSafeFunction successfully" << std::endl;
+    }
+    else
+    {
+        std::wcout << L"[!] napi_create_threadsafe_function failed: " << status << std::endl;
+    }
+
+    return original_add_msg_listener(arg1, arg2, arg3, arg4);
+}
+
+// 安全地读取内存
+bool SafeReadMemory(void *address, void *buffer, size_t size)
+{
+    __try
+    {
+        memcpy(buffer, address, size);
         return true;
     }
-    catch (const std::exception &)
+    __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        MessageBoxExW(NULL, L"Hook failed", L"Error", MB_OK, 0);
         return false;
     }
 }
 
-INT_PTR g_timerId = 0;
-HMODULE g_selfModule = NULL;
+// Hook群组撤回函数
+void *HookedRecallGrp(void *arg1, void *arg2, void *arg3, void *arg4, void *arg5, void *arg6, void *arg7, void *arg8)
+{
+    std::wcout << L"[+] Group Recall detected" << std::endl;
+
+    // 根据JS代码分析，需要从rbp寄存器偏移获取peer和seq
+    std::string peer = "819085771"; // 默认值
+    uint64_t seq = 12345;           // 默认值
+
+    // 获取当前栈指针并尝试读取参数
+    void *stackPtr = GetCurrentStackPointer();
+    if (stackPtr != nullptr)
+    {
+        // 尝试从栈中读取peer (rbp+0x30+0x1)
+        char peerBuffer[256] = {0};
+        char *peerPtr = (char *)((UINT_PTR)stackPtr + 0x30 + 0x1);
+        if (SafeReadMemory(peerPtr, peerBuffer, sizeof(peerBuffer) - 1))
+        {
+            peer = std::string(peerBuffer);
+        }
+
+        // 尝试从栈中读取seq (rbp+0x80)
+        uint64_t seqValue = 0;
+        uint64_t *seqPtr = (uint64_t *)((UINT_PTR)stackPtr + 0x80);
+        if (SafeReadMemory(seqPtr, &seqValue, sizeof(seqValue)))
+        {
+            seq = seqValue;
+        }
+    }
+
+    std::wcout << L"peer: " << std::wstring(peer.begin(), peer.end()).c_str() << std::endl;
+    std::wcout << L"seq: " << seq << std::endl;
+
+    if (tsfn_ptr)
+    {
+        std::string tip_text = "Sequence: " + std::to_string(seq) + " has been recalled";
+        CallAddGrayTip(peer, tip_text);
+    }
+
+    return original_recall_grp(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8);
+}
+
+// 内存补丁函数
+bool PatchGroupRecall(HMODULE hModule)
+{
+    try
+    {
+        BYTE patchCode[] = {0x75}; // jnz
+        UINT_PTR patchAddr = (UINT_PTR)hModule + recall_grp_patch_rva;
+
+        DWORD OldProtect = 0;
+        VirtualProtect((LPVOID)patchAddr, 1, PAGE_EXECUTE_READWRITE, &OldProtect);
+
+        BYTE origByte = *(BYTE *)patchAddr;
+        if (origByte != 0x74)
+        {
+            std::wcout << L"[!] Warning: Target address is not jz instruction (0x74), actual: "
+                       << std::hex << origByte << std::endl;
+        }
+        else
+        {
+            memcpy((LPVOID)patchAddr, patchCode, 1);
+            std::wcout << L"[+] Successfully patched jz(0x74) to jnz(0x75)" << std::endl;
+        }
+
+        VirtualProtect((LPVOID)patchAddr, 1, OldProtect, &OldProtect);
+        return true;
+    }
+    catch (const std::exception &e)
+    {
+        std::wcout << L"[!] Patch failed: " << std::wstring(e.what(), e.what() + strlen(e.what())).c_str() << std::endl;
+        return false;
+    }
+}
+
+// 设置Hook
+bool SetupHooks()
+{
+    funchook_t *funchook = funchook_create();
+    if (!funchook)
+    {
+        std::wcout << L"[!] Failed to create funchook" << std::endl;
+        return false;
+    }
+
+    // Hook add_msg_listener
+    void *add_msg_listener_addr = (void *)((UINT_PTR)g_wrapperModule + add_msg_listener_rva);
+    original_add_msg_listener = (add_msg_listener_func)add_msg_listener_addr;
+
+    int ret1 = funchook_prepare(funchook, (void **)&original_add_msg_listener, (void *)HookedAddMsgListener);
+    if (ret1 != 0)
+    {
+        std::wcout << L"[!] Failed to prepare hook for add_msg_listener: " << ret1 << std::endl;
+        funchook_destroy(funchook);
+        return false;
+    }
+
+    // Hook recall_grp_func
+    void *recall_grp_addr = (void *)((UINT_PTR)g_wrapperModule + recall_grp_func_rva);
+    original_recall_grp = (recall_grp_func)recall_grp_addr;
+
+    int ret2 = funchook_prepare(funchook, (void **)&original_recall_grp, (void *)HookedRecallGrp);
+    if (ret2 != 0)
+    {
+        std::wcout << L"[!] Failed to prepare hook for recall_grp: " << ret2 << std::endl;
+        funchook_destroy(funchook);
+        return false;
+    }
+
+    // 安装hooks
+    int install_ret = funchook_install(funchook, 0);
+    if (install_ret != 0)
+    {
+        std::wcout << L"[!] Failed to install hooks: " << install_ret << std::endl;
+        funchook_destroy(funchook);
+        return false;
+    }
+
+    std::wcout << L"[+] Hooks installed successfully" << std::endl;
+    return true;
+}
+
+// 主初始化函数
+bool InitializeAntiRecall()
+{
+    // 等待wrapper.node加载
+    g_wrapperModule = GetModuleHandleW(L"wrapper.node");
+    if (!g_wrapperModule)
+    {
+        std::wcout << L"[!] wrapper.node not found" << std::endl;
+        return false;
+    }
+    std::wcout << L"[+] wrapper.node baseAddr: " << std::hex << g_wrapperModule << std::endl;
+
+    // 初始化NAPI函数
+    if (!InitializeNAPIFunctions())
+    {
+        std::wcout << L"[!] Failed to initialize NAPI functions" << std::endl;
+        return false;
+    }
+
+    // 应用内存补丁
+    if (!PatchGroupRecall(g_wrapperModule))
+    {
+        std::wcout << L"[!] Failed to patch group recall" << std::endl;
+        return false;
+    }
+
+    // 设置函数hooks
+    if (!SetupHooks())
+    {
+        std::wcout << L"[!] Failed to setup hooks" << std::endl;
+        return false;
+    }
+
+    std::wcout << L"[+] Anti-recall initialization completed successfully" << std::endl;
+    return true;
+}
 
 // 检查模块是否已加载
 bool IsModuleLoaded(const wchar_t *moduleName)
@@ -135,11 +611,10 @@ bool IsModuleLoaded(const wchar_t *moduleName)
             wchar_t szModName[MAX_PATH];
             if (GetModuleFileNameExW(GetCurrentProcess(), hModules[i], szModName, sizeof(szModName) / sizeof(wchar_t)))
             {
-                // 获取文件名部分
                 wchar_t *fileName = wcsrchr(szModName, L'\\');
                 if (fileName != NULL)
                 {
-                    fileName++; // 跳过反斜杠
+                    fileName++;
                     if (_wcsicmp(fileName, moduleName) == 0)
                     {
                         return true;
@@ -151,6 +626,9 @@ bool IsModuleLoaded(const wchar_t *moduleName)
     return false;
 }
 
+INT_PTR g_timerId = 0;
+HMODULE g_selfModule = NULL;
+
 // 定时器回调函数
 VOID CALLBACK TimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime)
 {
@@ -160,52 +638,56 @@ VOID CALLBACK TimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime)
         KillTimer(NULL, g_timerId);
         g_timerId = 0;
 
-        // 执行 hook 操作
-        hookRecall(GetModuleHandleW(L"wrapper.node"));
+        // 执行初始化
+        InitializeAntiRecall();
 
         // 卸载自身
         FreeLibraryAndExitThread(g_selfModule, 0);
     }
 }
 
-// 创建启动检测线程
+// 模块检测线程
 DWORD WINAPI CheckModuleThread(LPVOID lpParam)
 {
-    // 创建一个定时器，每5000毫秒检查一次
     g_timerId = SetTimer(NULL, 0, 5000, TimerProc);
-    // 保持消息循环运行，以便定时器能够工作
+
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0))
     {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
-
     return 0;
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved)
 {
-    HANDLE hThread = NULL;
     switch (ul_reason_for_call)
     {
     case DLL_PROCESS_ATTACH:
+    {
         g_selfModule = hModule;
-        DisableThreadLibraryCalls(hModule); // 禁用线程通知，提高效率
+        DisableThreadLibraryCalls(hModule);
 
-        hThread = CreateThread(NULL, 0, CheckModuleThread, NULL, 0, NULL);
+        HANDLE hThread = CreateThread(NULL, 0, CheckModuleThread, NULL, 0, NULL);
         if (hThread)
         {
             CloseHandle(hThread);
         }
-        break;
+    }
+    break;
 
     case DLL_PROCESS_DETACH:
-        // 在DLL卸载时确保定时器被清理
         if (g_timerId != 0)
         {
             KillTimer(NULL, g_timerId);
         }
+        // 清理内存
+        for (void *ptr : ref_ptr_array)
+        {
+            delete ptr;
+        }
+        ref_ptr_array.clear();
         break;
     }
     return TRUE;

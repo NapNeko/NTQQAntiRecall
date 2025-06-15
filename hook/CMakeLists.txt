@@ -7,10 +7,16 @@ endif()
 
 project(NapCatWinBootHook)
 set(CMAKE_CXX_STANDARD 26)
+include_directories("${CMAKE_CURRENT_SOURCE_DIR}/funchook/include")
+link_directories("./funchook/lib")
 
 if(MSVC)
 	add_compile_options("$<$<C_COMPILER_ID:MSVC>:/utf-8>")
 	add_compile_options("$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
 endif()
+
 file(GLOB SOURCES "*.cpp")
 add_library(NapCatWinBootHook SHARED ${SOURCES})
+target_link_libraries(NapCatWinBootHook funchook)
+target_link_libraries(NapCatWinBootHook distorm)
+target_link_libraries(NapCatWinBootHook psapi)

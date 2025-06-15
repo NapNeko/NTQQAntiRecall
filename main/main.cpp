@@ -1,87 +1,312 @@
 #include <windows.h>
 #include <iostream>
-#include <csignal>
-#include <signal.h>
 #include <fstream>
-#include <algorithm>
-#include <tuple>
+#include <vector>
 
 HANDLE MainProcessHandle = NULL;
-std::wstring env;
 
-bool addEnv(const std::wstring& key, const std::wstring& value)
+// PE手动映射结构
+typedef struct _MANUAL_MAPPING_DATA
 {
-    if (key.empty() || value.empty())
+    LPVOID ImageBase;
+    HMODULE(WINAPI *fnLoadLibraryA)(LPCSTR);
+    FARPROC(WINAPI *fnGetProcAddress)(HMODULE, LPCSTR);
+} MANUAL_MAPPING_DATA, *PMANUAL_MAPPING_DATA;
+
+// Shellcode for manual mapping execution
+DWORD WINAPI ManualMappingShell(PMANUAL_MAPPING_DATA pData);
+void __stdcall ShellcodeEnd();
+
+// 读取DLL文件到内存
+std::vector<BYTE> ReadDllFile(const std::wstring &dllPath)
+{
+    std::ifstream file(dllPath, std::ios::binary | std::ios::ate);
+    if (!file.is_open())
     {
-        return false;
-    }
-    env += key + L"=" + value + L'\0';
-    return true;
-}
-
-std::string Utf16ToUtf8(const std::wstring& utf16)
-{
-    int length = WideCharToMultiByte(CP_UTF8, 0, utf16.c_str(), -1, NULL, 0, NULL, NULL);
-    std::string utf8(length, 0);
-    WideCharToMultiByte(CP_UTF8, 0, utf16.c_str(), -1, &utf8[0], length, NULL, NULL);
-    utf8.pop_back();
-    return utf8;
-}
-
-std::wstring Utf8ToUtf16(const std::string& utf8)
-{
-    int length = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, NULL, 0);
-    std::wstring utf16(length, 0);
-    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, &utf16[0], length);
-    utf16.pop_back();
-    return utf16;
-}
-
-bool initEnv()
-{
-    LPWCH envStrings = GetEnvironmentStringsW();
-    if (envStrings == NULL)
-    {
-        return false;
+        std::wcerr << L"Failed to open DLL file: " << dllPath << std::endl;
+        return {};
     }
 
-    LPWCH envVar = envStrings;
-    while (*envVar)
+    std::streamsize size = file.tellg();
+    file.seekg(0, std::ios::beg);
+
+    std::vector<BYTE> buffer(size);
+    if (!file.read(reinterpret_cast<char *>(buffer.data()), size))
     {
-        std::wstring envEntry(envVar);
-        size_t pos = envEntry.find(L'=');
-        if (pos != std::wstring::npos)
+        std::wcerr << L"Failed to read DLL file" << std::endl;
+        return {};
+    }
+
+    return buffer;
+}
+
+// 手动映射DLL到远程进程
+bool ManualMapDll(HANDLE hProcess, const std::vector<BYTE> &dllData)
+{
+    if (dllData.size() < sizeof(IMAGE_DOS_HEADER))
+    {
+        std::wcerr << L"Invalid DLL data size" << std::endl;
+        return false;
+    }
+
+    PIMAGE_DOS_HEADER pDosHeader = reinterpret_cast<PIMAGE_DOS_HEADER>(const_cast<BYTE *>(dllData.data()));
+    if (pDosHeader->e_magic != IMAGE_DOS_SIGNATURE)
+    {
+        std::wcerr << L"Invalid DOS header" << std::endl;
+        return false;
+    }
+
+    if (pDosHeader->e_lfanew + sizeof(IMAGE_NT_HEADERS) > dllData.size())
+    {
+        std::wcerr << L"Invalid PE structure" << std::endl;
+        return false;
+    }
+
+    PIMAGE_NT_HEADERS pNtHeaders = reinterpret_cast<PIMAGE_NT_HEADERS>(const_cast<BYTE *>(dllData.data()) + pDosHeader->e_lfanew);
+    if (pNtHeaders->Signature != IMAGE_NT_SIGNATURE)
+    {
+        std::wcerr << L"Invalid NT header" << std::endl;
+        return false;
+    }
+
+    if (pNtHeaders->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64)
+    {
+        std::wcerr << L"Unsupported architecture" << std::endl;
+        return false;
+    }
+
+    // 在远程进程中分配内存
+    LPVOID pImageBase = VirtualAllocEx(hProcess, nullptr, pNtHeaders->OptionalHeader.SizeOfImage,
+                                       MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!pImageBase)
+    {
+        std::wcerr << L"Failed to allocate memory in target process, error: " << GetLastError() << std::endl;
+        return false;
+    }
+
+    // 复制PE头部
+    if (!WriteProcessMemory(hProcess, pImageBase, dllData.data(), pNtHeaders->OptionalHeader.SizeOfHeaders, nullptr))
+    {
+        std::wcerr << L"Failed to write PE headers, error: " << GetLastError() << std::endl;
+        VirtualFreeEx(hProcess, pImageBase, 0, MEM_RELEASE);
+        return false;
+    }
+
+    // 复制各个节
+    PIMAGE_SECTION_HEADER pSectionHeader = IMAGE_FIRST_SECTION(pNtHeaders);
+    for (WORD i = 0; i < pNtHeaders->FileHeader.NumberOfSections; ++i, ++pSectionHeader)
+    {
+        if (pSectionHeader->SizeOfRawData == 0 || pSectionHeader->PointerToRawData == 0)
+            continue;
+
+        if (pSectionHeader->PointerToRawData + pSectionHeader->SizeOfRawData > dllData.size())
         {
-            std::wstring key = envEntry.substr(0, pos);
-            std::wstring value = envEntry.substr(pos + 1);
-            addEnv(key, value);
+            std::wcerr << L"Invalid section data" << std::endl;
+            VirtualFreeEx(hProcess, pImageBase, 0, MEM_RELEASE);
+            return false;
         }
-        envVar += envEntry.length() + 1;
+
+        LPVOID pSectionDest = reinterpret_cast<LPVOID>(reinterpret_cast<ULONG_PTR>(pImageBase) + pSectionHeader->VirtualAddress);
+        const BYTE *pSectionSrc = dllData.data() + pSectionHeader->PointerToRawData;
+
+        if (!WriteProcessMemory(hProcess, pSectionDest, pSectionSrc, pSectionHeader->SizeOfRawData, nullptr))
+        {
+            std::wcerr << L"Failed to write section: " << i << L", error: " << GetLastError() << std::endl;
+            VirtualFreeEx(hProcess, pImageBase, 0, MEM_RELEASE);
+            return false;
+        }
     }
 
-    FreeEnvironmentStringsW(envStrings);
+    // 准备手动映射数据
+    MANUAL_MAPPING_DATA mappingData = {};
+    mappingData.ImageBase = pImageBase;
+    mappingData.fnLoadLibraryA = LoadLibraryA;
+    mappingData.fnGetProcAddress = GetProcAddress;
+
+    // 分配数据结构内存
+    LPVOID pMappingData = VirtualAllocEx(hProcess, nullptr, sizeof(MANUAL_MAPPING_DATA),
+                                         MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!pMappingData)
+    {
+        std::wcerr << L"Failed to allocate mapping data memory, error: " << GetLastError() << std::endl;
+        VirtualFreeEx(hProcess, pImageBase, 0, MEM_RELEASE);
+        return false;
+    }
+
+    if (!WriteProcessMemory(hProcess, pMappingData, &mappingData, sizeof(MANUAL_MAPPING_DATA), nullptr))
+    {
+        std::wcerr << L"Failed to write mapping data, error: " << GetLastError() << std::endl;
+        VirtualFreeEx(hProcess, pImageBase, 0, MEM_RELEASE);
+        VirtualFreeEx(hProcess, pMappingData, 0, MEM_RELEASE);
+        return false;
+    }
+
+    // 分配shellcode内存
+    DWORD shellcodeSize = reinterpret_cast<DWORD_PTR>(ShellcodeEnd) - reinterpret_cast<DWORD_PTR>(ManualMappingShell);
+    LPVOID pShellcode = VirtualAllocEx(hProcess, nullptr, shellcodeSize,
+                                       MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!pShellcode)
+    {
+        std::wcerr << L"Failed to allocate shellcode memory, error: " << GetLastError() << std::endl;
+        VirtualFreeEx(hProcess, pImageBase, 0, MEM_RELEASE);
+        VirtualFreeEx(hProcess, pMappingData, 0, MEM_RELEASE);
+        return false;
+    }
+
+    if (!WriteProcessMemory(hProcess, pShellcode, ManualMappingShell, shellcodeSize, nullptr))
+    {
+        std::wcerr << L"Failed to write shellcode, error: " << GetLastError() << std::endl;
+        VirtualFreeEx(hProcess, pImageBase, 0, MEM_RELEASE);
+        VirtualFreeEx(hProcess, pMappingData, 0, MEM_RELEASE);
+        VirtualFreeEx(hProcess, pShellcode, 0, MEM_RELEASE);
+        return false;
+    }
+
+    // 创建远程线程执行shellcode
+    HANDLE hThread = CreateRemoteThread(hProcess, nullptr, 0,
+                                        reinterpret_cast<LPTHREAD_START_ROUTINE>(pShellcode),
+                                        pMappingData, 0, nullptr);
+    if (!hThread)
+    {
+        std::wcerr << L"Failed to create remote thread, error: " << GetLastError() << std::endl;
+        VirtualFreeEx(hProcess, pImageBase, 0, MEM_RELEASE);
+        VirtualFreeEx(hProcess, pMappingData, 0, MEM_RELEASE);
+        VirtualFreeEx(hProcess, pShellcode, 0, MEM_RELEASE);
+        return false;
+    }
+
+    // 等待执行完成
+    DWORD waitResult = WaitForSingleObject(hThread, 10000); // 10秒超时
+    if (waitResult != WAIT_OBJECT_0)
+    {
+        std::wcerr << L"Shellcode execution timeout or failed" << std::endl;
+    }
+
+    CloseHandle(hThread);
+
+    // 清理内存
+    VirtualFreeEx(hProcess, pMappingData, 0, MEM_RELEASE);
+    VirtualFreeEx(hProcess, pShellcode, 0, MEM_RELEASE);
+
+    std::wcout << L"Manual DLL mapping completed successfully" << std::endl;
     return true;
 }
 
-void CreateSuspendedProcessW(const wchar_t* processName, const wchar_t* dllPath)
+// 手动映射执行的shellcode
+DWORD WINAPI ManualMappingShell(PMANUAL_MAPPING_DATA pData)
 {
-    STARTUPINFOW si = { sizeof(si) };
+    if (!pData || !pData->ImageBase)
+        return FALSE;
+
+    BYTE *pBase = reinterpret_cast<BYTE *>(pData->ImageBase);
+    PIMAGE_DOS_HEADER pDosHeader = reinterpret_cast<PIMAGE_DOS_HEADER>(pBase);
+
+    if (pDosHeader->e_magic != IMAGE_DOS_SIGNATURE)
+        return FALSE;
+
+    PIMAGE_NT_HEADERS pNtHeaders = reinterpret_cast<PIMAGE_NT_HEADERS>(pBase + pDosHeader->e_lfanew);
+
+    if (pNtHeaders->Signature != IMAGE_NT_SIGNATURE)
+        return FALSE;
+
+    // 处理导入表
+    PIMAGE_DATA_DIRECTORY pImportDir = &pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (pImportDir->Size && pImportDir->VirtualAddress)
+    {
+        PIMAGE_IMPORT_DESCRIPTOR pImportDesc = reinterpret_cast<PIMAGE_IMPORT_DESCRIPTOR>(pBase + pImportDir->VirtualAddress);
+
+        while (pImportDesc->Name)
+        {
+            char *szModuleName = reinterpret_cast<char *>(pBase + pImportDesc->Name);
+            HMODULE hModule = pData->fnLoadLibraryA(szModuleName);
+
+            if (!hModule)
+            {
+                ++pImportDesc;
+                continue;
+            }
+
+            ULONG_PTR *pThunkRef = nullptr;
+            ULONG_PTR *pFuncRef = reinterpret_cast<ULONG_PTR *>(pBase + pImportDesc->FirstThunk);
+
+            if (pImportDesc->OriginalFirstThunk)
+                pThunkRef = reinterpret_cast<ULONG_PTR *>(pBase + pImportDesc->OriginalFirstThunk);
+            else
+                pThunkRef = pFuncRef;
+
+            for (; *pThunkRef; ++pThunkRef, ++pFuncRef)
+            {
+                if (IMAGE_SNAP_BY_ORDINAL(*pThunkRef))
+                {
+                    *pFuncRef = reinterpret_cast<ULONG_PTR>(pData->fnGetProcAddress(hModule,
+                                                                                    reinterpret_cast<char *>(*pThunkRef & 0xFFFF)));
+                }
+                else
+                {
+                    PIMAGE_IMPORT_BY_NAME pImport = reinterpret_cast<PIMAGE_IMPORT_BY_NAME>(pBase + *pThunkRef);
+                    *pFuncRef = reinterpret_cast<ULONG_PTR>(pData->fnGetProcAddress(hModule, pImport->Name));
+                }
+            }
+            ++pImportDesc;
+        }
+    }
+
+    // 处理重定位表
+    PIMAGE_DATA_DIRECTORY pRelocDir = &pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+    if (pRelocDir->Size && pRelocDir->VirtualAddress)
+    {
+        ULONG_PTR delta = reinterpret_cast<ULONG_PTR>(pBase) - pNtHeaders->OptionalHeader.ImageBase;
+        if (delta)
+        {
+            PIMAGE_BASE_RELOCATION pReloc = reinterpret_cast<PIMAGE_BASE_RELOCATION>(pBase + pRelocDir->VirtualAddress);
+
+            while (pReloc->VirtualAddress && pReloc->SizeOfBlock)
+            {
+                WORD *pRelocData = reinterpret_cast<WORD *>(pReloc + 1);
+                DWORD numEntries = (pReloc->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
+
+                for (DWORD i = 0; i < numEntries; ++i, ++pRelocData)
+                {
+                    WORD type = *pRelocData >> 12;
+                    WORD offset = *pRelocData & 0xFFF;
+
+                    if (type == IMAGE_REL_BASED_DIR64)
+                    {
+                        ULONG_PTR *pPatch = reinterpret_cast<ULONG_PTR *>(pBase + pReloc->VirtualAddress + offset);
+                        *pPatch += delta;
+                    }
+                }
+                pReloc = reinterpret_cast<PIMAGE_BASE_RELOCATION>(reinterpret_cast<BYTE *>(pReloc) + pReloc->SizeOfBlock);
+            }
+        }
+    }
+
+    // 调用DLL入口点
+    if (pNtHeaders->OptionalHeader.AddressOfEntryPoint)
+    {
+        typedef BOOL(WINAPI * DllMainFunc)(HMODULE, DWORD, LPVOID);
+        DllMainFunc fnDllMain = reinterpret_cast<DllMainFunc>(pBase + pNtHeaders->OptionalHeader.AddressOfEntryPoint);
+        fnDllMain(reinterpret_cast<HMODULE>(pBase), DLL_PROCESS_ATTACH, nullptr);
+    }
+
+    return TRUE;
+}
+
+void __stdcall ShellcodeEnd() { return; }
+
+void CreateSuspendedProcessWithManualMapping(const wchar_t *processName, const wchar_t *dllPath)
+{
+    STARTUPINFOW si = {sizeof(si)};
     PROCESS_INFORMATION pi;
     ZeroMemory(&pi, sizeof(PROCESS_INFORMATION));
     ZeroMemory(&si, sizeof(STARTUPINFOW));
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-    env.append(1, L'\0');
 
-    if (!CreateProcessW(NULL, (LPWSTR)processName, NULL, NULL, TRUE, CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT, (LPVOID)env.c_str(), NULL, &si, &pi))
+    // 使用简单的进程创建
+    if (!CreateProcessW(NULL, (LPWSTR)processName, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, &si, &pi))
     {
         DWORD error = GetLastError();
-        LPVOID errorMsg;
-        FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, error, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPWSTR)&errorMsg, 0, NULL);
         std::wcerr << L"Error Code: " << error << std::endl;
         std::wcerr << L"Process Path: " << processName << std::endl;
-        std::wcerr << L"Error: " << (wchar_t*)errorMsg << std::endl;
-        LocalFree(errorMsg);
         std::wcerr << L"Failed to start process." << std::endl;
         return;
     }
@@ -89,33 +314,38 @@ void CreateSuspendedProcessW(const wchar_t* processName, const wchar_t* dllPath)
     MainProcessHandle = pi.hProcess;
     std::wcout << L"[NapCat Backend] Main Process ID:" << pi.dwProcessId << std::endl;
 
-    LPVOID pRemoteBuf = VirtualAllocEx(pi.hProcess, NULL, (wcslen(dllPath) + 1) * sizeof(wchar_t), MEM_COMMIT, PAGE_READWRITE);
-    WriteProcessMemory(pi.hProcess, pRemoteBuf, (LPVOID)dllPath, (wcslen(dllPath) + 1) * sizeof(wchar_t), NULL);
+    // 等待进程初始化
+    Sleep(1000);
 
-    HANDLE hThread = CreateRemoteThread(pi.hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)LoadLibraryW, pRemoteBuf, 0, NULL);
-    WaitForSingleObject(hThread, INFINITE);
+    // 读取DLL文件
+    std::vector<BYTE> dllData = ReadDllFile(dllPath);
+    if (dllData.empty())
+    {
+        std::wcerr << L"Failed to read DLL file" << std::endl;
+        TerminateProcess(pi.hProcess, 1);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        return;
+    }
+
+    // 执行手动映射注入
+    if (!ManualMapDll(pi.hProcess, dllData))
+    {
+        std::wcerr << L"Manual mapping failed" << std::endl;
+        TerminateProcess(pi.hProcess, 1);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        return;
+    }
+
+    // 恢复主线程
     ResumeThread(pi.hThread);
+
+    // 等待进程结束
     WaitForSingleObject(pi.hProcess, INFINITE);
 
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
-    if (WaitForSingleObject(pi.hProcess, 0) == WAIT_TIMEOUT)
-    {
-        TerminateProcess(pi.hProcess, 0);
-    }
-}
-
-bool IsUserAnAdmin()
-{
-    BOOL fIsRunAsAdmin = FALSE;
-    PSID pAdministratorsGroup = NULL;
-    SID_IDENTIFIER_AUTHORITY NtAuthority = SECURITY_NT_AUTHORITY;
-    if (AllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &pAdministratorsGroup))
-    {
-        CheckTokenMembership(NULL, pAdministratorsGroup, &fIsRunAsAdmin);
-        FreeSid(pAdministratorsGroup);
-    }
-    return fIsRunAsAdmin;
 }
 
 void signalHandler(int signum)
@@ -128,28 +358,7 @@ void signalHandler(int signum)
     exit(signum);
 }
 
-std::tuple<bool, std::wstring> getQQInstalledW()
-{
-    HKEY QQUnInstallData;
-    std::wstring QQPath;
-    wchar_t szUninstallString[1024];
-    DWORD dwSize = sizeof(szUninstallString);
-    LONG QQUnInstallTableResult = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\QQ", 0, KEY_READ, &QQUnInstallData);
-    if (QQUnInstallTableResult != ERROR_SUCCESS)
-    {
-        return std::make_tuple(false, L"");
-    }
-    LONG QQUnInstallResult = RegQueryValueExW(QQUnInstallData, L"UninstallString", NULL, NULL, (LPBYTE)szUninstallString, &dwSize);
-    if (QQUnInstallResult != ERROR_SUCCESS)
-    {
-        return std::make_tuple(false, L"");
-    }
-    QQPath = szUninstallString;
-    QQPath = QQPath.substr(0, QQPath.find_last_of(L"\\")) + L"\\QQ.exe";
-    return std::make_tuple(true, QQPath);
-}
-
-std::wstring getFullPath(const std::wstring& relativePath)
+std::wstring getFullPath(const std::wstring &relativePath)
 {
     wchar_t szFullPath[MAX_PATH];
     GetCurrentDirectoryW(MAX_PATH, szFullPath);
@@ -158,27 +367,24 @@ std::wstring getFullPath(const std::wstring& relativePath)
     return fullPath;
 }
 
-void writeScriptToFile(const std::wstring& filePath, const std::wstring& script)
-{
-    std::ofstream outFile(filePath, std::ios::out | std::ios::binary);
-    if (outFile.is_open())
-    {
-        std::string script_utf8 = Utf16ToUtf8(script);
-        outFile.write(script_utf8.c_str(), script_utf8.size());
-        outFile.close();
-        std::wcout << L"File written successfully to " << filePath << std::endl;
-    }
-    else
-    {
-        std::wcerr << L"Failed to open file " << filePath << std::endl;
-    }
-}
-
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCmdShow)
 {
-    initEnv();
     std::wstring QQPath = getFullPath(L"QQ.exe");
     std::wstring QQInjectDll = getFullPath(L"NapCatWinBootHook.dll");
-    CreateSuspendedProcessW(QQPath.c_str(), QQInjectDll.c_str());
+
+    // 检查文件是否存在
+    if (GetFileAttributesW(QQPath.c_str()) == INVALID_FILE_ATTRIBUTES)
+    {
+        std::wcerr << L"QQ.exe not found: " << QQPath << std::endl;
+        return 1;
+    }
+
+    if (GetFileAttributesW(QQInjectDll.c_str()) == INVALID_FILE_ATTRIBUTES)
+    {
+        std::wcerr << L"DLL not found: " << QQInjectDll << std::endl;
+        return 1;
+    }
+
+    CreateSuspendedProcessWithManualMapping(QQPath.c_str(), QQInjectDll.c_str());
     return 0;
 }
