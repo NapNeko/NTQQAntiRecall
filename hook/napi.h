@@ -150,7 +150,7 @@ public:
         }
 
         // 尝试获取已加载的 qqnt.dll
-        m_hModule = GetModuleHandleA("qqnt.dll");
+        m_hModule = ::GetModuleHandleA("qqnt.dll");
         if (!m_hModule)
         {
             // 如果没有找到，尝试其他可能的名称
@@ -162,7 +162,7 @@ public:
 
             for (int i = 0; possibleNames[i]; i++)
             {
-                m_hModule = GetModuleHandleA(possibleNames[i]);
+                m_hModule = ::GetModuleHandleA(possibleNames[i]);
                 if (m_hModule)
                 {
                     break;

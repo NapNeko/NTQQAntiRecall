@@ -8,6 +8,8 @@
 #include <memory>
 #include <algorithm>
 #include "funchook.h"
+#include "helper.h"
+#include "ServiceScan.h"
 
 // NAPI类型定义和常量
 typedef void *napi_env;
@@ -61,15 +63,12 @@ typedef void (*napi_threadsafe_function_call_js)(napi_env env, napi_value js_cal
 #define NAPI_AUTO_LENGTH SIZE_MAX
 
 // QQNT Windows 35341 关键RVA地址
-const DWORD add_local_gray_tip_rva = 0x1121B4E;
-const DWORD recall_grp_patch_rva = 0x25BF57F;
-const DWORD add_msg_listener_rva = 0x11133F4;
-const DWORD recall_grp_func_rva = 0x25BF4D3;
+DWORD add_local_gray_tip_rva = 0x0;
+DWORD add_msg_listener_rva = 0x0;
 
 // 全局变量
 napi_threadsafe_function tsfn_ptr = nullptr;
 napi_ref msgService_Js_This_Ref = nullptr;
-std::vector<void *> ref_ptr_array; // 内存管理
 HMODULE g_wrapperModule = nullptr;
 HMODULE g_qqntModule = nullptr;
 
@@ -148,84 +147,6 @@ void *GetCurrentStackPointer()
 #endif
     return stackPtr;
 }
-
-// 辅助函数
-std::string RemoveSpaces(const std::string &input)
-{
-    std::string result;
-    for (char c : input)
-    {
-        if (c != ' ')
-        {
-            result += c;
-        }
-    }
-    return result;
-}
-
-std::vector<uint8_t> ParseHexPattern(const std::string &hexPattern)
-{
-    std::string cleanedPattern = RemoveSpaces(hexPattern);
-    std::vector<uint8_t> pattern;
-    for (size_t i = 0; i < cleanedPattern.length(); i += 2)
-    {
-        std::string byteStr = cleanedPattern.substr(i, 2);
-        if (byteStr == "??")
-        {
-            pattern.push_back(0xCC);
-        }
-        else
-        {
-            uint8_t byte = static_cast<uint8_t>(std::stoi(byteStr, nullptr, 16));
-            pattern.push_back(byte);
-        }
-    }
-    return pattern;
-}
-
-bool MatchPatternWithWildcard(const uint8_t *data, const std::vector<uint8_t> &pattern)
-{
-    for (size_t i = 0; i < pattern.size(); ++i)
-    {
-        if (pattern[i] != 0xCC && data[i] != pattern[i])
-        {
-            return false;
-        }
-    }
-    return true;
-}
-
-uint64_t SearchRangeAddressInModule(HMODULE module, const std::string &hexPattern, uint64_t searchStartRVA = 0, uint64_t searchEndRVA = 0)
-{
-    HANDLE processHandle = GetCurrentProcess();
-    MODULEINFO modInfo;
-    if (!GetModuleInformation(processHandle, module, &modInfo, sizeof(MODULEINFO)))
-    {
-        return 0;
-    }
-
-    std::vector<uint8_t> pattern = ParseHexPattern(hexPattern);
-    uint8_t *base = static_cast<uint8_t *>(modInfo.lpBaseOfDll);
-    uint8_t *searchStart = base + searchStartRVA;
-    if (searchEndRVA == 0)
-    {
-        searchEndRVA = modInfo.SizeOfImage;
-    }
-    uint8_t *searchEnd = base + searchEndRVA;
-
-    if (searchStart >= base && searchEnd <= base + modInfo.SizeOfImage)
-    {
-        for (uint8_t *current = searchStart; current < searchEnd; ++current)
-        {
-            if (MatchPatternWithWildcard(current, pattern))
-            {
-                return reinterpret_cast<uint64_t>(current);
-            }
-        }
-    }
-    return 0;
-}
-
 // 初始化NAPI函数指针
 bool InitializeNAPIFunctions()
 {
@@ -269,19 +190,10 @@ void CallAddGrayTip(const std::string &peerUid, const std::string &tipText)
     CallbackData *data = new CallbackData();
     data->peerUid = peerUid;
     data->tipText = tipText;
-    ref_ptr_array.push_back(data);
 
     napi_status status = napi_call_threadsafe_function_ptr(tsfn_ptr, data, napi_tsfn_blocking);
     if (status != napi_ok)
     {
-        std::wcout << L"[!] napi_call_threadsafe_function failed: " << status << std::endl;
-        delete data;
-        // 从数组中移除
-        auto it = std::find(ref_ptr_array.begin(), ref_ptr_array.end(), data);
-        if (it != ref_ptr_array.end())
-        {
-            ref_ptr_array.erase(it);
-        }
     }
 }
 
@@ -298,14 +210,6 @@ void ThreadSafeFunctionCallback(napi_env env, napi_value js_callback, void *cont
     {
         groupId = callbackData->peerUid;
         tip_text = callbackData->tipText;
-
-        // 清理内存
-        auto it = std::find(ref_ptr_array.begin(), ref_ptr_array.end(), callbackData);
-        if (it != ref_ptr_array.end())
-        {
-            ref_ptr_array.erase(it);
-        }
-        delete callbackData;
     }
 
     // 创建第一个对象参数 (peer info)
@@ -374,6 +278,7 @@ void ThreadSafeFunctionCallback(napi_env env, napi_value js_callback, void *cont
     napi_status call_status = napi_call_function_ptr(env, js_this, native_func, 4, argv, &result);
 
     std::wcout << L"[*] napi_call_function status: " << call_status << std::endl;
+    delete callbackData;
 }
 
 // Hook消息监听器
@@ -480,39 +385,6 @@ void *HookedRecallGrp(void *arg1, void *arg2, void *arg3, void *arg4, void *arg5
     return original_recall_grp(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8);
 }
 
-// 内存补丁函数
-bool PatchGroupRecall(HMODULE hModule)
-{
-    try
-    {
-        BYTE patchCode[] = {0x75}; // jnz
-        UINT_PTR patchAddr = (UINT_PTR)hModule + recall_grp_patch_rva;
-
-        DWORD OldProtect = 0;
-        VirtualProtect((LPVOID)patchAddr, 1, PAGE_EXECUTE_READWRITE, &OldProtect);
-
-        BYTE origByte = *(BYTE *)patchAddr;
-        if (origByte != 0x74)
-        {
-            std::wcout << L"[!] Warning: Target address is not jz instruction (0x74), actual: "
-                       << std::hex << origByte << std::endl;
-        }
-        else
-        {
-            memcpy((LPVOID)patchAddr, patchCode, 1);
-            std::wcout << L"[+] Successfully patched jz(0x74) to jnz(0x75)" << std::endl;
-        }
-
-        VirtualProtect((LPVOID)patchAddr, 1, OldProtect, &OldProtect);
-        return true;
-    }
-    catch (const std::exception &e)
-    {
-        std::wcout << L"[!] Patch failed: " << std::wstring(e.what(), e.what() + strlen(e.what())).c_str() << std::endl;
-        return false;
-    }
-}
-
 // 设置Hook
 bool SetupHooks()
 {
@@ -536,6 +408,8 @@ bool SetupHooks()
     }
 
     // Hook recall_grp_func
+    std::string pattern = "80 BD ?? ?? ?? ?? ?? 0F ?? ?? ?? ?? 44 88 ?? ?? ?? 44 89 ?? ?? ?? 48 8D ?? ?? 48 89 ?? ?? ?? 48 89 ?? ?? ?? 4C 89 ?? ?? ?? 4C 89 ?? ?? ?? 48 8D ?? ?? 48 89 ?? ?? ?? 48 8D ?? ?? 48 89 ?? ?? ?? 48 89 ?? ?? ?? 48 ?? ?? ?? ?? ?? ?? 48 89 ?? ?? ?? 48 ?? ?? ?? ?? ?? ?? 48 89 ?? ?? ?? 48 ?? ?? ?? ?? ?? ?? BA ?? ?? ?? ?? 41 ?? ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 89 DF 8A 9D ?? ?? ?? ?? 48 8B ?? ?? ?? ?? ?? 4C 8D ?? ?? ?? ?? ?? 48 89 F1 48 8D ?? ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B ?? ?? ?? ?? ?? 48 85 C9 4C 8D ?? ?? 74 ?? 48 8B 01 4C 89 F2 FF ??";
+    UINT64 recall_grp_func_rva = SearchRangeAddressInModule(g_wrapperModule, pattern) + 168;
     void *recall_grp_addr = (void *)((UINT_PTR)g_wrapperModule + recall_grp_func_rva);
     original_recall_grp = (recall_grp_func)recall_grp_addr;
 
@@ -572,6 +446,54 @@ bool InitializeAntiRecall()
     }
     std::wcout << L"[+] wrapper.node baseAddr: " << std::hex << g_wrapperModule << std::endl;
 
+    // 获取wrapper.node的目录
+    char wrapperPath[MAX_PATH];
+    if (GetModuleFileNameA(g_wrapperModule, wrapperPath, MAX_PATH) == 0)
+    {
+        std::wcout << L"[!] Failed to get wrapper.node path" << std::endl;
+        return false;
+    }
+
+    PEAnalyzer analyzer(wrapperPath);
+    auto services = analyzer.scan_services();
+    // 找到"NodeIKernelMsgService"服务
+    auto it = std::find_if(services.begin(), services.end(),
+                           [](const ServiceInfo &service)
+                           { return service.service_name == "NodeIKernelMsgService"; });
+    if (it == services.end())
+    {
+        std::wcout << L"[!] NodeIKernelMsgService not found" << std::endl;
+        return false;
+    }
+    std::wcout << L"[+] Found NodeIKernelMsgService at vtable address: " << std::hex << it->vtable_address << std::endl;
+    // 找到addKernelMsgListener方法
+    auto addMsgListenerIt = std::find_if(it->methods.begin(), it->methods.end(),
+                                         [](const std::pair<std::string, uint64_t> &method)
+                                         {
+                                             return method.first == "addKernelMsgListener";
+                                         });
+    if (addMsgListenerIt == it->methods.end())
+    {
+        std::wcout << L"[!] addKernelMsgListener not found" << std::endl;
+        return false;
+    }
+    std::wcout << L"[+] Found addKernelMsgListener at address: " << std::hex << addMsgListenerIt->second << std::endl;
+    add_msg_listener_rva = addMsgListenerIt->second;
+
+    // 找到addLocalJsonGrayTipMsg方法
+    auto addLocalJsonGrayTipMsgIt = std::find_if(it->methods.begin(), it->methods.end(),
+                                                 [](const std::pair<std::string, uint64_t> &method)
+                                                 {
+                                                     return method.first == "addLocalJsonGrayTipMsg";
+                                                 });
+    if (addLocalJsonGrayTipMsgIt == it->methods.end())
+    {
+        std::wcout << L"[!] addLocalJsonGrayTipMsg not found" << std::endl;
+        return false;
+    }
+    std::wcout << L"[+] Found addLocalJsonGrayTipMsg at address: " << std::hex << addLocalJsonGrayTipMsgIt->second << std::endl;
+    add_local_gray_tip_rva = addLocalJsonGrayTipMsgIt->second;
+
     // 初始化NAPI函数
     if (!InitializeNAPIFunctions())
     {
@@ -580,7 +502,7 @@ bool InitializeAntiRecall()
     }
 
     // 应用内存补丁
-    if (!PatchGroupRecall(g_wrapperModule))
+    if (!hookGroupRecall(g_wrapperModule))
     {
         std::wcout << L"[!] Failed to patch group recall" << std::endl;
         return false;
@@ -640,16 +562,13 @@ VOID CALLBACK TimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime)
 
         // 执行初始化
         InitializeAntiRecall();
-
-        // 卸载自身
-        FreeLibraryAndExitThread(g_selfModule, 0);
     }
 }
 
 // 模块检测线程
 DWORD WINAPI CheckModuleThread(LPVOID lpParam)
 {
-    g_timerId = SetTimer(NULL, 0, 5000, TimerProc);
+    g_timerId = SetTimer(NULL, 0, 1000, TimerProc);
 
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0))
@@ -678,16 +597,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
     break;
 
     case DLL_PROCESS_DETACH:
-        if (g_timerId != 0)
-        {
-            KillTimer(NULL, g_timerId);
-        }
-        // 清理内存
-        for (void *ptr : ref_ptr_array)
-        {
-            delete ptr;
-        }
-        ref_ptr_array.clear();
         break;
     }
     return TRUE;
