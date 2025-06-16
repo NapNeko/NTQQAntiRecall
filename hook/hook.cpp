@@ -149,7 +149,7 @@ recall_grp_func original_recall_grp = nullptr;
 struct CallbackData
 {
     std::string peerUid;
-    std::string tipText;
+    UINT64 seq;
 };
 
 // 获取栈指针的辅助函数 - 使用更安全的方式
@@ -198,7 +198,7 @@ bool InitializeNAPIFunctions()
 }
 
 // 调用添加灰色提示
-void CallAddGrayTip(const std::string &peerUid, const std::string &tipText)
+void CallAddGrayTip(const std::string &peerUid, UINT64 seq)
 {
     if (!tsfn_ptr)
     {
@@ -209,7 +209,7 @@ void CallAddGrayTip(const std::string &peerUid, const std::string &tipText)
     // 创建回调数据
     CallbackData *data = new CallbackData();
     data->peerUid = peerUid;
-    data->tipText = tipText;
+    data->seq = seq;
 
     napi_status status = napi_call_threadsafe_function_ptr(tsfn_ptr, data, napi_tsfn_blocking);
     if (status != napi_ok)
@@ -229,7 +229,7 @@ void ThreadSafeFunctionCallback(napi_env env, napi_value js_callback, void *cont
     if (callbackData)
     {
         groupId = callbackData->peerUid;
-        tip_text = callbackData->tipText;
+        tip_text = "seq: " + std::to_string(callbackData->seq) + " recalled, check ";
     }
 
     // 创建第一个对象参数 (peer info)
@@ -261,7 +261,7 @@ void ThreadSafeFunctionCallback(napi_env env, napi_value js_callback, void *cont
     napi_set_named_property_ptr(env, obj2, "busiId", busiId);
 
     // jsonStr
-    std::string jsonStr = R"({"align":"center","items":[{"txt":")" + tip_text + R"(","type":"nor"}]})";
+    std::string jsonStr = R"({"align":"center","items":[{"txt":")" + tip_text + R"(","type":"nor"},{"type":"url","txt":"msg","col":"3","local_jp":58,"param":{"seq":)" + std::to_string(callbackData->seq) + R"(}}]})";
     napi_value jsonStrValue;
     napi_create_string_utf8_ptr(env, jsonStr.c_str(), jsonStr.length(), &jsonStrValue);
     napi_set_named_property_ptr(env, obj2, "jsonStr", jsonStrValue);
@@ -377,8 +377,7 @@ __int64 __fastcall HookedGrpRecallListener(
     std::cout << "[Debug] seq: " << seq_value << std::endl;
     if (tsfn_ptr)
     {
-        std::string tip_text = "Sequence: " + std::to_string(seq_value) + " has been recalled";
-        CallAddGrayTip(peer, tip_text);
+        CallAddGrayTip(peer, seq_value);
     }
     // return original_grp_recall_listener(a1, a2, a3, a4, a5, Str, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16);
     return 0;
