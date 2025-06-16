@@ -633,10 +633,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
     {
         g_selfModule = hModule;
         DisableThreadLibraryCalls(hModule);
-        AttachConsole(ATTACH_PARENT_PROCESS);
-        // 重打开输出流
-        freopen("CONOUT$", "w", stdout);
-        freopen("CONOUT$", "w", stderr);
         HANDLE hThread = CreateThread(NULL, 0, CheckModuleThread, NULL, 0, NULL);
         if (hThread)
         {
