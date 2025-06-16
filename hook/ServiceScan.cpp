@@ -28,6 +28,7 @@ bool PEAnalyzer::load_file(const std::string &filename)
     std::ifstream file(filename, std::ios::binary | std::ios::ate);
     if (!file.is_open())
     {
+        std::cout << "[error] Failed to open file: " << filename << std::endl;
         return false;
     }
 
@@ -37,78 +38,237 @@ bool PEAnalyzer::load_file(const std::string &filename)
     pe_data.resize(size);
     if (!file.read(reinterpret_cast<char *>(pe_data.data()), size))
     {
+        std::cout << "[error] Failed to read file content" << std::endl;
         return false;
     }
 
     // Parse PE headers
     if (pe_data.size() < sizeof(DOSHeader))
     {
+        std::cout << "[error] File too small for DOS header" << std::endl;
         return false;
     }
 
     auto dos_header = reinterpret_cast<const DOSHeader *>(pe_data.data());
     if (dos_header->e_magic != 0x5A4D)
     { // "MZ"
+        std::cout << "[error] Invalid DOS signature" << std::endl;
         return false;
     }
 
-    if (pe_data.size() < dos_header->e_lfanew + sizeof(NTHeaders) + sizeof(OptionalHeader))
+    // 检查NT头偏移是否有效
+    if (dos_header->e_lfanew >= pe_data.size() || 
+        dos_header->e_lfanew + sizeof(uint32_t) + sizeof(FileHeader) >= pe_data.size())
     {
+        std::cout << "[error] Invalid NT header offset" << std::endl;
         return false;
     }
 
-    auto optional_header = reinterpret_cast<const OptionalHeader *>(
-        pe_data.data() + dos_header->e_lfanew + sizeof(uint32_t) + sizeof(NTHeaders) - sizeof(OptionalHeader));
+    // 检查PE签名
+    uint32_t *nt_signature = reinterpret_cast<uint32_t *>(pe_data.data() + dos_header->e_lfanew);
+    if (*nt_signature != 0x00004550) // "PE\0\0"
+    {
+        std::cout << "[error] Invalid PE signature" << std::endl;
+        return false;
+    }
+
+    auto file_header = reinterpret_cast<const FileHeader *>(
+        pe_data.data() + dos_header->e_lfanew + sizeof(uint32_t));
+
+    // 检查可选头大小
+    if (file_header->size_of_optional_header < sizeof(OptionalHeader64))
+    {
+        std::cout << "[error] Optional header too small" << std::endl;
+        return false;
+    }
+
+    auto optional_header = reinterpret_cast<const OptionalHeader64 *>(
+        pe_data.data() + dos_header->e_lfanew + sizeof(uint32_t) + sizeof(FileHeader));
+
+    // 检查魔数是否为PE32+
+    if (optional_header->magic != 0x020b)
+    {
+        std::cout << "[error] Not a PE32+ file (64-bit)" << std::endl;
+        return false;
+    }
 
     image_base = optional_header->image_base;
+    std::cout << "[debug] PE file loaded successfully, image_base: 0x" << std::hex << image_base << std::dec << std::endl;
+    std::cout << "[debug] Number of sections: " << file_header->number_of_sections << std::endl;
 
     return true;
+}
+
+uint32_t PEAnalyzer::rva_to_file_offset(uint32_t rva)
+{
+    if (pe_data.size() < sizeof(DOSHeader))
+    {
+        std::cout << "[debug] Invalid PE data for RVA conversion: 0x" << std::hex << rva << std::dec << std::endl;
+        return 0;
+    }
+
+    auto dos_header = reinterpret_cast<const DOSHeader *>(pe_data.data());
+    auto file_header = reinterpret_cast<const FileHeader *>(
+        pe_data.data() + dos_header->e_lfanew + sizeof(uint32_t));
+
+    auto sections_start = pe_data.data() + dos_header->e_lfanew + sizeof(uint32_t) +
+                          sizeof(FileHeader) + file_header->size_of_optional_header;
+
+    for (uint16_t i = 0; i < file_header->number_of_sections; ++i)
+    {
+        auto section = reinterpret_cast<const SectionHeader *>(sections_start + i * sizeof(SectionHeader));
+
+        if (rva >= section->virtual_address && 
+            rva < section->virtual_address + section->virtual_size)
+        {
+            uint32_t offset_in_section = rva - section->virtual_address;
+            
+            // 检查原始数据大小
+            if (section->size_of_raw_data == 0)
+            {
+                std::cout << "[debug] Section has no raw data (BSS section?)" << std::endl;
+                return 0; // BSS段或未初始化段
+            }
+            
+            // 确保偏移不超过原始数据大小
+            if (offset_in_section >= section->size_of_raw_data)
+            {
+                std::cout << "[debug] RVA 0x" << std::hex << rva 
+                          << " is beyond raw data (offset: 0x" << offset_in_section 
+                          << ", raw_size: 0x" << section->size_of_raw_data << ")" << std::dec << std::endl;
+                return 0;
+            }
+            
+            uint32_t file_offset = section->pointer_to_raw_data + offset_in_section;
+            return file_offset;
+        }
+    }
+
+    std::cout << "[debug] RVA 0x" << std::hex << rva << " not found in any section" << std::dec << std::endl;
+    return 0; // 找不到对应节区
 }
 
 std::optional<SectionRange> PEAnalyzer::get_section_range_rva(const std::string &section_name)
 {
     if (pe_data.size() < sizeof(DOSHeader))
     {
+        std::cout << "[error] Invalid PE data size" << std::endl;
         return std::nullopt;
     }
 
     auto dos_header = reinterpret_cast<const DOSHeader *>(pe_data.data());
-    auto nt_headers = reinterpret_cast<const NTHeaders *>(pe_data.data() + dos_header->e_lfanew + sizeof(uint32_t));
+    auto file_header = reinterpret_cast<const FileHeader *>(
+        pe_data.data() + dos_header->e_lfanew + sizeof(uint32_t));
 
     auto sections_start = pe_data.data() + dos_header->e_lfanew + sizeof(uint32_t) +
-                          sizeof(NTHeaders) + nt_headers->size_of_optional_header;
+                          sizeof(FileHeader) + file_header->size_of_optional_header;
 
-    for (uint16_t i = 0; i < nt_headers->number_of_sections; ++i)
+    std::cout << "[debug] Looking for section: " << section_name << std::endl;
+
+    for (uint16_t i = 0; i < file_header->number_of_sections; ++i)
     {
         auto section = reinterpret_cast<const SectionHeader *>(sections_start + i * sizeof(SectionHeader));
 
-        std::string name(section->name, strnlen(section->name, 8));
+        // 安全地获取节区名称
+        std::string name;
+        for (int j = 0; j < 8 && section->name[j] != '\0'; ++j)
+        {
+            name += section->name[j];
+        }
+
+        std::cout << "[debug] Found section: " << name 
+                  << " RVA: 0x" << std::hex << section->virtual_address
+                  << " Size: 0x" << section->virtual_size 
+                  << " RawSize: 0x" << section->size_of_raw_data << std::dec << std::endl;
+
         if (name == section_name)
         {
-            return SectionRange{section->virtual_address,
-                                section->virtual_address + section->size_of_raw_data};
+            // 只返回有原始数据的范围
+            uint32_t end_rva = section->virtual_address;
+            if (section->size_of_raw_data > 0)
+            {
+                end_rva += std::min(section->virtual_size, section->size_of_raw_data);
+            }
+            else
+            {
+                end_rva += section->virtual_size;
+            }
+            
+            return SectionRange{section->virtual_address, end_rva};
         }
     }
 
+    std::cout << "[error] Section " << section_name << " not found" << std::endl;
     return std::nullopt;
 }
 
 std::optional<uint32_t> PEAnalyzer::search_bytes(uint32_t start, uint32_t end,
                                                  const std::vector<uint8_t> &pattern)
 {
-    if (pattern.empty() || start >= pe_data.size() || end > pe_data.size())
+    if (pattern.empty())
     {
+        std::cout << "[error] Empty search pattern" << std::endl;
         return std::nullopt;
     }
 
-    for (uint32_t i = start; i <= end - pattern.size(); ++i)
+    std::cout << "[debug] Searching pattern in RVA range: 0x" << std::hex << start 
+              << " - 0x" << end << std::dec << std::endl;
+
+    // 搜索范围不能为空
+    if (start >= end)
     {
-        if (std::equal(pattern.begin(), pattern.end(), pe_data.begin() + i))
-        {
-            return i;
-        }
+        std::cout << "[error] Invalid search range: start >= end" << std::endl;
+        return std::nullopt;
     }
 
+    // 按4KB块搜索，避免大范围转换问题
+    const uint32_t BLOCK_SIZE = 4096;
+    uint32_t current_rva = start;
+
+    while (current_rva < end)
+    {
+        uint32_t block_end = std::min(current_rva + BLOCK_SIZE, end);
+        uint32_t file_start = rva_to_file_offset(current_rva);
+        
+        if (file_start == 0)
+        {
+            // 跳过无法转换的RVA
+            current_rva = block_end;
+            continue;
+        }
+
+        // 计算实际可搜索的大小
+        uint32_t search_size = block_end - current_rva;
+        if (search_size < pattern.size())
+        {
+            current_rva = block_end;
+            continue;
+        }
+
+        // 确保不会越界
+        if (file_start + search_size > pe_data.size())
+        {
+            search_size = pe_data.size() - file_start;
+        }
+
+        if (search_size >= pattern.size())
+        {
+            // 在当前块中搜索
+            for (uint32_t i = 0; i <= search_size - pattern.size(); ++i)
+            {
+                if (std::equal(pattern.begin(), pattern.end(), pe_data.begin() + file_start + i))
+                {
+                    uint32_t found_rva = current_rva + i;
+                    std::cout << "[debug] Pattern found at RVA: 0x" << std::hex << found_rva << std::dec << std::endl;
+                    return found_rva;
+                }
+            }
+        }
+
+        current_rva = block_end;
+    }
+
+    std::cout << "[debug] Pattern not found in specified range" << std::endl;
     return std::nullopt;
 }
 
@@ -116,17 +276,50 @@ std::vector<uint32_t> PEAnalyzer::search_bytes_all(uint32_t start, uint32_t end,
                                                    const std::vector<uint8_t> &pattern)
 {
     std::vector<uint32_t> results;
-    if (pattern.empty() || start >= pe_data.size() || end > pe_data.size())
+    if (pattern.empty() || start >= end)
     {
         return results;
     }
 
-    for (uint32_t i = start; i <= end - pattern.size(); ++i)
+    // 按块搜索，类似于search_bytes
+    const uint32_t BLOCK_SIZE = 4096;
+    uint32_t current_rva = start;
+
+    while (current_rva < end)
     {
-        if (std::equal(pattern.begin(), pattern.end(), pe_data.begin() + i))
+        uint32_t block_end = std::min(current_rva + BLOCK_SIZE, end);
+        uint32_t file_start = rva_to_file_offset(current_rva);
+        
+        if (file_start == 0)
         {
-            results.push_back(i);
+            current_rva = block_end;
+            continue;
         }
+
+        uint32_t search_size = block_end - current_rva;
+        if (search_size < pattern.size())
+        {
+            current_rva = block_end;
+            continue;
+        }
+
+        if (file_start + search_size > pe_data.size())
+        {
+            search_size = pe_data.size() - file_start;
+        }
+
+        if (search_size >= pattern.size())
+        {
+            for (uint32_t i = 0; i <= search_size - pattern.size(); ++i)
+            {
+                if (std::equal(pattern.begin(), pattern.end(), pe_data.begin() + file_start + i))
+                {
+                    results.push_back(current_rva + i);
+                }
+            }
+        }
+
+        current_rva = block_end;
     }
 
     return results;
@@ -134,27 +327,48 @@ std::vector<uint32_t> PEAnalyzer::search_bytes_all(uint32_t start, uint32_t end,
 
 std::vector<uint8_t> PEAnalyzer::get_data(uint32_t rva, uint32_t size)
 {
-    if (rva + size > pe_data.size())
+    uint32_t file_offset = rva_to_file_offset(rva);
+    
+    if (file_offset == 0)
     {
+        std::cout << "[warning] Failed to convert RVA 0x" << std::hex << rva << " to file offset" << std::dec << std::endl;
         return {};
     }
+    
+    if (file_offset + size > pe_data.size())
+    {
+        std::cout << "[warning] Data read beyond file bounds: offset=0x" << std::hex << file_offset 
+                  << " size=0x" << size << " file_size=0x" << pe_data.size() << std::dec << std::endl;
+        // 调整大小到文件末尾
+        if (file_offset >= pe_data.size())
+        {
+            return {};
+        }
+        size = pe_data.size() - file_offset;
+    }
 
-    return std::vector<uint8_t>(pe_data.begin() + rva, pe_data.begin() + rva + size);
+    return std::vector<uint8_t>(pe_data.begin() + file_offset, pe_data.begin() + file_offset + size);
 }
 
 std::string PEAnalyzer::read_utf8_string(uint32_t rva)
 {
     std::string result;
+    uint32_t file_offset = rva_to_file_offset(rva);
 
-    while (rva < pe_data.size())
+    if (file_offset == 0)
     {
-        uint8_t byte = pe_data[rva];
+        return result;
+    }
+
+    while (file_offset < pe_data.size())
+    {
+        uint8_t byte = pe_data[file_offset];
         if (byte == 0)
         {
             break;
         }
         result += static_cast<char>(byte);
-        ++rva;
+        ++file_offset;
     }
 
     return result;
@@ -168,6 +382,7 @@ std::vector<uint64_t> PEAnalyzer::find_service_register_calls(uint32_t offset_qq
     auto code_bytes = get_data(offset_qqnt_service, max_bytes);
     if (code_bytes.empty())
     {
+        std::cout << "[debug] No code data retrieved for service register search" << std::endl;
         return service_registers_function;
     }
 
@@ -177,6 +392,7 @@ std::vector<uint64_t> PEAnalyzer::find_service_register_calls(uint32_t offset_qq
 
     if (count == 0)
     {
+        std::cout << "[debug] Failed to disassemble code for service register search" << std::endl;
         return service_registers_function;
     }
 
@@ -236,6 +452,7 @@ std::vector<uint64_t> PEAnalyzer::find_service_register_calls(uint32_t offset_qq
     }
 
     cs_free(insn, count);
+    std::cout << "[debug] Found " << service_registers_function.size() << " service register calls" << std::endl;
     return service_registers_function;
 }
 
@@ -338,7 +555,11 @@ std::pair<std::optional<uint64_t>, uint32_t> PEAnalyzer::read_aligned_qword(uint
 {
     uint32_t cur_addr = addr;
 
-    while (cur_addr + 8 <= pe_data.size())
+    // 限制循环次数，避免无限循环
+    const int max_iterations = 1024;
+    int iterations = 0;
+
+    while (iterations < max_iterations)
     {
         auto qword_bytes = get_data(cur_addr, 8);
         if (qword_bytes.size() < 8)
@@ -356,7 +577,9 @@ std::pair<std::optional<uint64_t>, uint32_t> PEAnalyzer::read_aligned_qword(uint
         {
             return {qword, cur_addr + 8};
         }
+        
         cur_addr += 8;
+        iterations++;
     }
 
     return {std::nullopt, cur_addr};
@@ -393,6 +616,9 @@ std::vector<ServiceInfo> PEAnalyzer::scan_services()
     if (!rdata_range || !text_range || !data_range)
     {
         std::cout << "[error] Required sections not found" << std::endl;
+        std::cout << "[debug] .rdata: " << (rdata_range ? "found" : "not found") << std::endl;
+        std::cout << "[debug] .text: " << (text_range ? "found" : "not found") << std::endl;
+        std::cout << "[debug] .data: " << (data_range ? "found" : "not found") << std::endl;
         return services;
     }
 

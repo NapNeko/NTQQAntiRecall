@@ -6,33 +6,53 @@
 #include <optional>
 #include "capstone/capstone.h"
 
-struct SectionRange {
+struct SectionRange
+{
     uint32_t start;
     uint32_t end;
 };
 
-struct ServiceInfo {
+struct ServiceInfo
+{
     std::string service_name;
     uint64_t vtable_address;
     uint32_t descriptor_size;
     std::vector<std::pair<std::string, uint64_t>> methods;
 };
 
-class PEAnalyzer {
+class PEAnalyzer
+{
 private:
     std::vector<uint8_t> pe_data;
     uint64_t image_base;
     csh capstone_handle;
-    
-    // PE Header structures
-    struct DOSHeader {
+
+    // PE Header structures - 修正定义
+    struct DOSHeader
+    {
         uint16_t e_magic;
-        uint8_t padding[58];
+        uint16_t e_cblp;
+        uint16_t e_cp;
+        uint16_t e_crlc;
+        uint16_t e_cparhdr;
+        uint16_t e_minalloc;
+        uint16_t e_maxalloc;
+        uint16_t e_ss;
+        uint16_t e_sp;
+        uint16_t e_csum;
+        uint16_t e_ip;
+        uint16_t e_cs;
+        uint16_t e_lfarlc;
+        uint16_t e_ovno;
+        uint16_t e_res[4];
+        uint16_t e_oemid;
+        uint16_t e_oeminfo;
+        uint16_t e_res2[10];
         uint32_t e_lfanew;
     };
-    
-    struct NTHeaders {
-        uint32_t signature;
+
+    struct FileHeader
+    {
         uint16_t machine;
         uint16_t number_of_sections;
         uint32_t time_date_stamp;
@@ -41,8 +61,9 @@ private:
         uint16_t size_of_optional_header;
         uint16_t characteristics;
     };
-    
-    struct OptionalHeader {
+
+    struct OptionalHeader64
+    {
         uint16_t magic;
         uint8_t major_linker_version;
         uint8_t minor_linker_version;
@@ -66,9 +87,17 @@ private:
         uint32_t checksum;
         uint16_t subsystem;
         uint16_t dll_characteristics;
+        uint64_t size_of_stack_reserve;
+        uint64_t size_of_stack_commit;
+        uint64_t size_of_heap_reserve;
+        uint64_t size_of_heap_commit;
+        uint32_t loader_flags;
+        uint32_t number_of_rva_and_sizes;
+        // Data directories follow
     };
-    
-    struct SectionHeader {
+
+    struct SectionHeader
+    {
         char name[8];
         uint32_t virtual_size;
         uint32_t virtual_address;
@@ -81,22 +110,25 @@ private:
         uint32_t characteristics;
     };
 
+    // 添加RVA到文件偏移转换函数
+    uint32_t rva_to_file_offset(uint32_t rva);
+
 public:
-    explicit PEAnalyzer(const std::string& filename);
+    explicit PEAnalyzer(const std::string &filename);
     ~PEAnalyzer();
-    
-    bool load_file(const std::string& filename);
-    std::optional<SectionRange> get_section_range_rva(const std::string& section_name);
-    std::optional<uint32_t> search_bytes(uint32_t start, uint32_t end, const std::vector<uint8_t>& pattern);
-    std::vector<uint32_t> search_bytes_all(uint32_t start, uint32_t end, const std::vector<uint8_t>& pattern);
+
+    bool load_file(const std::string &filename);
+    std::optional<SectionRange> get_section_range_rva(const std::string &section_name);
+    std::optional<uint32_t> search_bytes(uint32_t start, uint32_t end, const std::vector<uint8_t> &pattern);
+    std::vector<uint32_t> search_bytes_all(uint32_t start, uint32_t end, const std::vector<uint8_t> &pattern);
     std::vector<uint8_t> get_data(uint32_t rva, uint32_t size);
     std::string read_utf8_string(uint32_t rva);
     std::vector<uint64_t> find_service_register_calls(uint32_t offset_qqnt_service, uint32_t max_bytes = 1024);
-    std::tuple<std::optional<uint64_t>, std::optional<uint64_t>, std::optional<uint32_t>> 
-        extract_service_info(uint32_t func_rva, uint32_t max_bytes = 512);
+    std::tuple<std::optional<uint64_t>, std::optional<uint64_t>, std::optional<uint32_t>>
+    extract_service_info(uint32_t func_rva, uint32_t max_bytes = 512);
     std::pair<std::optional<uint64_t>, uint32_t> read_aligned_qword(uint32_t addr);
     std::pair<std::optional<std::string>, uint32_t> read_aligned_utf8_string(uint32_t addr);
-    
+
     uint64_t get_image_base() const { return image_base; }
     std::vector<ServiceInfo> scan_services();
 };
