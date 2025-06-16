@@ -387,7 +387,6 @@ bool SetupHooks()
 
     bool success = true;
 
-    // Hook add_msg_listener (保持原有的 funchook 实现)
     funchook_t *funchook = funchook_create();
     if (!funchook)
     {
@@ -420,33 +419,32 @@ bool SetupHooks()
         }
     }
 
-    // Hook recall_grp_func 使用新的内联 Hook
-    std::string pattern = "49 89 DF 8A 9D ?? ?? ?? ?? 48 8B ?? ?? ?? ?? ?? 4C 8D ?? ?? ?? ?? ?? 48 8D ?? ?? 4C 8D ?? ?? ?? ?? ?? 48 89 F1 4C 89 F2 E8 ?? ?? ?? ?? 48 8B ?? ?? ?? ?? ?? 48 85 C9 75 ?? 48 8B 01 48 89 FA FF ??";
-    UINT64 recall_grp_func_rva = SearchRangeAddressInModule(g_wrapperModule, pattern) + 55;
-    void *recall_grp_addr = (void *)((UINT_PTR)g_wrapperModule + recall_grp_func_rva);
+    // Hook recall_grp_func
+    // std::string pattern = "49 89 DF 8A 9D ?? ?? ?? ?? 48 8B ?? ?? ?? ?? ?? 4C 8D ?? ?? ?? ?? ?? 48 8D ?? ?? 4C 8D ?? ?? ?? ?? ?? 48 89 F1 4C 89 F2 E8 ?? ?? ?? ?? 48 8B ?? ?? ?? ?? ?? 48 85 C9 75 ?? 48 8B 01 48 89 FA FF ??";
+    // UINT64 recall_grp_func_rva = SearchRangeAddressInModule(g_wrapperModule, pattern) + 55;
+    // void *recall_grp_addr = (void *)((UINT_PTR)g_wrapperModule + recall_grp_func_rva);
 
-    if (!QQHookManager::InstallHook(recall_grp_addr, RecallGroupHookCallback))
-    {
-        std::wcout << L"[!] Failed to hook recall_grp at address: "
-                   << std::hex << recall_grp_addr << std::endl;
-        success = false;
-    }
-    else
-    {
-        std::wcout << L"[+] Successfully hooked recall_grp at address: "
-                   << std::hex << recall_grp_addr << L" using InlineHook" << std::endl;
-    }
+    // if (!QQHookManager::InstallHook(recall_grp_addr, RecallGroupHookCallback))
+    // {
+    //     std::wcout << L"[!] Failed to hook recall_grp at address: "
+    //                << std::hex << recall_grp_addr << std::endl;
+    //     success = false;
+    // }
+    // else
+    // {
+    //     std::wcout << L"[+] Successfully hooked recall_grp at address: "
+    //                << std::hex << recall_grp_addr << L" using InlineHook" << std::endl;
+    // }
 
-    if (success)
-    {
-        std::wcout << L"[+] Hooks installed successfully (mixed implementation)" << std::endl;
-    }
-    else
-    {
-        std::wcout << L"[!] Some hooks failed to install" << std::endl;
-        // 清理已安装的 hooks
-        QQHookManager::Cleanup();
-    }
+    // if (success)
+    // {
+    //     std::wcout << L"[+] Hooks installed successfully (mixed implementation)" << std::endl;
+    // }
+    // else
+    // {
+    //     std::wcout << L"[!] Some hooks failed to install" << std::endl;
+    //     QQHookManager::Cleanup();
+    // }
 
     return success;
 }
