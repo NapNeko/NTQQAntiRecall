@@ -330,8 +330,71 @@ void *HookedAddMsgListener(void *arg1, void *arg2, void *arg3, void *arg4)
     return original_add_msg_listener(arg1, arg2, arg3, arg4);
 }
 
+// 安全读取字符串的辅助函数
+std::string SafeReadString(uint64_t address, size_t max_length = 256)
+{
+    if (address == 0)
+        return "";
+
+    // 检查内存是否可读
+    MEMORY_BASIC_INFORMATION mbi;
+    if (VirtualQuery((LPCVOID)address, &mbi, sizeof(mbi)) == 0)
+    {
+        return "";
+    }
+
+    if (!(mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)))
+    {
+        return "";
+    }
+
+    try
+    {
+        char *str_ptr = (char *)address;
+        size_t len = strnlen(str_ptr, max_length);
+        if (len > 0 && len < max_length)
+        {
+            return std::string(str_ptr, len);
+        }
+    }
+    catch (...)
+    {
+        // 捕获任何访问异常
+    }
+
+    return "";
+}
+
+// 安全读取64位整数的辅助函数
+uint64_t SafeReadUInt64(uint64_t address)
+{
+    if (address == 0)
+        return 0;
+
+    // 检查内存是否可读
+    MEMORY_BASIC_INFORMATION mbi;
+    if (VirtualQuery((LPCVOID)address, &mbi, sizeof(mbi)) == 0)
+    {
+        return 0;
+    }
+
+    if (!(mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)))
+    {
+        return 0;
+    }
+
+    try
+    {
+        return *(uint64_t *)address;
+    }
+    catch (...)
+    {
+        return 0;
+    }
+}
+
 // Hook群组撤回函数
-void RecallGroupHookCallback(const StackAnalyzer::RegisterContext *ctx)
+void RecallGroupHookCallback(uint64_t rbp)
 {
     std::wcout << L"[+] Group Recall detected" << std::endl;
 
@@ -340,33 +403,30 @@ void RecallGroupHookCallback(const StackAnalyzer::RegisterContext *ctx)
 
     try
     {
-        // 根据 JS 代码分析：从 rbp+0x30+0x1 读取 peer
-        const uint64_t peer_offset = 0x30;
-        const uint64_t peer_ptr = ctx->rbp + peer_offset;
-
-        // 读取 peer 字符串指针并偏移1字节
-        char *peer_addr = (char *)(peer_ptr + 0x1);
-
-        // 安全读取 peer 字符串
-        size_t peer_len = strlen(peer_addr);
-        if (peer_len > 0 && peer_len < 256)
+        // 根据JS代码：从 rbp+0x30+0x1 读取 peer
+        const uint64_t peer_str_addr = rbp + 0x30 + 0x1;
+        std::wcout << L"[Debug] Reading peer from address: 0x" << std::hex << peer_str_addr << std::endl;
+        std::string peer_result = SafeReadString(peer_str_addr);
+        if (!peer_result.empty())
         {
-            peer = std::string(peer_addr);
+            peer = peer_result;
+            std::wcout << L"[Debug] Successfully read peer: "
+                       << std::wstring(peer.begin(), peer.end()).c_str() << std::endl;
         }
 
-        // 根据 JS 代码分析：从 rbp+0x80 读取 seq
-        const uint64_t seq_offset = 0x80;
-        const uint64_t seq_ptr = ctx->rbp + seq_offset;
-        seq = *(uint64_t *)seq_ptr;
+        // 根据JS代码：从 rbp+0x80 读取 seq
+        const uint64_t seq_addr = rbp + 0x80;
+        uint64_t seq_result = SafeReadUInt64(seq_addr);
+        if (seq_result != 0)
+        {
+            seq = seq_result;
+            std::wcout << L"[Debug] Successfully read seq: " << seq << std::endl;
+        }
     }
-    catch (const std::exception &e)
+    catch (...)
     {
-        std::wcout << L"[!] Exception in RecallGroupHookCallback: "
-                   << std::wstring(e.what(), e.what() + strlen(e.what())).c_str() << std::endl;
+        std::wcout << L"[!] Exception in RecallGroupHookCallback" << std::endl;
     }
-
-    std::wcout << L"peer: " << std::wstring(peer.begin(), peer.end()).c_str() << std::endl;
-    std::wcout << L"seq: " << seq << std::endl;
 
     // 发送灰色提示
     if (tsfn_ptr)
@@ -378,12 +438,6 @@ void RecallGroupHookCallback(const StackAnalyzer::RegisterContext *ctx)
 // 设置Hook
 bool SetupHooks()
 {
-    // 初始化 Hook 管理器
-    if (!QQHookManager::Initialize())
-    {
-        std::wcout << L"[!] Failed to initialize QQHookManager" << std::endl;
-        return false;
-    }
 
     bool success = true;
 
@@ -420,31 +474,25 @@ bool SetupHooks()
     }
 
     // Hook recall_grp_func
-    // std::string pattern = "49 89 DF 8A 9D ?? ?? ?? ?? 48 8B ?? ?? ?? ?? ?? 4C 8D ?? ?? ?? ?? ?? 48 8D ?? ?? 4C 8D ?? ?? ?? ?? ?? 48 89 F1 4C 89 F2 E8 ?? ?? ?? ?? 48 8B ?? ?? ?? ?? ?? 48 85 C9 75 ?? 48 8B 01 48 89 FA FF ??";
-    // UINT64 recall_grp_func_rva = SearchRangeAddressInModule(g_wrapperModule, pattern) + 55;
-    // void *recall_grp_addr = (void *)((UINT_PTR)g_wrapperModule + recall_grp_func_rva);
+    std::string pattern = "89 7C ?? ?? 4C 89 ?? ?? ?? 80 BD ?? ?? ?? ?? ?? 8A 85 ?? ?? ?? ?? 88 44 ?? ?? 0F ?? ?? ?? ?? 48 8D ?? ?? ?? ?? ?? 48 89 ?? ?? ?? 4C 89 ?? ?? ?? 4C 89 ?? ?? ?? 48 8D ?? ?? ?? ?? ?? 48 89 ?? ?? ?? 48 8D ?? ?? ?? ?? ?? 48 89 ?? ?? ?? 48 8D ?? ?? 48 89 ?? ?? ?? 48 ?? ?? ?? ?? ?? ?? 48 89 ?? ?? ?? 48 ?? ?? ?? ?? ?? ?? 48 89 ?? ?? ?? 48 ?? ?? ?? ?? ?? ?? 45 89 F5 44 89 F2 41 ?? ?? ?? ?? ?? E8 ?? ?? ?? ??";
+    UINT64 recall_grp_absolute_addr = SearchRangeAddressInModule(g_wrapperModule, pattern);
+    void *recall_grp_addr = (void *)(recall_grp_absolute_addr + 55);
+    if (!SimpleHookManager::InstallHook(recall_grp_addr, RecallGroupHookCallback))
+    {
+        std::wcout << L"[!] Failed to hook recall_grp at address: "
+                   << std::hex << recall_grp_addr << std::endl;
+        success = false;
+    }
+    else
+    {
+        std::wcout << L"[+] Successfully hooked recall_grp at address: "
+                   << std::hex << recall_grp_addr << L" using InlineHook" << std::endl;
+    }
 
-    // if (!QQHookManager::InstallHook(recall_grp_addr, RecallGroupHookCallback))
-    // {
-    //     std::wcout << L"[!] Failed to hook recall_grp at address: "
-    //                << std::hex << recall_grp_addr << std::endl;
-    //     success = false;
-    // }
-    // else
-    // {
-    //     std::wcout << L"[+] Successfully hooked recall_grp at address: "
-    //                << std::hex << recall_grp_addr << L" using InlineHook" << std::endl;
-    // }
-
-    // if (success)
-    // {
-    //     std::wcout << L"[+] Hooks installed successfully (mixed implementation)" << std::endl;
-    // }
-    // else
-    // {
-    //     std::wcout << L"[!] Some hooks failed to install" << std::endl;
-    //     QQHookManager::Cleanup();
-    // }
+    if (success)
+    {
+        std::wcout << L"[+] Hooks installed successfully (mixed implementation)" << std::endl;
+    }
 
     return success;
 }

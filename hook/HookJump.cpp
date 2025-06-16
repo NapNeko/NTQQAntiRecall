@@ -1,14 +1,13 @@
 #include "HookJump.h"
 #include <stdexcept>
 
-// 全局 hook 实例
-static InlineHook *g_hook = nullptr;
+// 全局变量
+static SimpleInlineHook *g_hook = nullptr;
 static HookCallback g_user_callback = nullptr;
 
-// InlineHook 类实现
-InlineHook::InlineHook()
+// SimpleInlineHook 类实现
+SimpleInlineHook::SimpleInlineHook() : target_addr(nullptr), trampoline(nullptr), is_active(false)
 {
-    // 初始化 Capstone 反汇编引擎
     if (cs_open(CS_ARCH_X86, CS_MODE_64, &cs_handle) != CS_ERR_OK)
     {
         throw std::runtime_error("Failed to initialize Capstone");
@@ -16,20 +15,16 @@ InlineHook::InlineHook()
     cs_option(cs_handle, CS_OPT_DETAIL, CS_OPT_ON);
 }
 
-InlineHook::~InlineHook()
+SimpleInlineHook::~SimpleInlineHook()
 {
-    // 清理所有 hook
-    for (auto &[addr, info] : hooks)
+    if (is_active)
     {
-        if (info.is_active)
-        {
-            UnhookFunction(addr);
-        }
+        Uninstall();
     }
     cs_close(&cs_handle);
 }
 
-size_t InlineHook::CalculateBackupSize(void *target_addr, size_t min_size)
+size_t SimpleInlineHook::CalculateBackupSize(void *target_addr, size_t min_size)
 {
     uint8_t *code = (uint8_t *)target_addr;
     cs_insn *insn;
@@ -54,7 +49,7 @@ size_t InlineHook::CalculateBackupSize(void *target_addr, size_t min_size)
     return total_size;
 }
 
-void *InlineHook::CreateTrampoline(void *target_addr, size_t backup_size, void *hook_func)
+void *SimpleInlineHook::CreateTrampoline(void *target_addr, size_t backup_size, void *hook_func)
 {
     // 分配可执行内存
     void *trampoline = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
@@ -65,25 +60,13 @@ void *InlineHook::CreateTrampoline(void *target_addr, size_t backup_size, void *
 
     uint8_t *tramp_ptr = (uint8_t *)trampoline;
 
-    // 1. 保存寄存器上下文
-    // pushfq
-    *tramp_ptr++ = 0x9C;
-
-    // push rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8-r15
-    const uint8_t push_regs[] = {
-        0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, // rax-rdi
-        0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41, 0x53, // r8-r11
-        0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57  // r12-r15
-    };
-    memcpy(tramp_ptr, push_regs, sizeof(push_regs));
-    tramp_ptr += sizeof(push_regs);
-
-    // 2. 调用 hook 函数
-    // mov rcx, rsp (传递栈指针作为参数)
+    // 1. 传递rbp作为参数 (Windows x64调用约定：第一个参数使用rcx)
+    // mov rcx, rbp
     *tramp_ptr++ = 0x48;
     *tramp_ptr++ = 0x89;
-    *tramp_ptr++ = 0xE1;
+    *tramp_ptr++ = 0xE9;
 
+    // 2. 调用hook函数
     // mov rax, hook_func_addr
     *tramp_ptr++ = 0x48;
     *tramp_ptr++ = 0xB8;
@@ -94,23 +77,11 @@ void *InlineHook::CreateTrampoline(void *target_addr, size_t backup_size, void *
     *tramp_ptr++ = 0xFF;
     *tramp_ptr++ = 0xD0;
 
-    // 3. 恢复寄存器上下文
-    const uint8_t pop_regs[] = {
-        0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, // r15-r12
-        0x41, 0x5B, 0x41, 0x5A, 0x41, 0x59, 0x41, 0x58, // r11-r8
-        0x5F, 0x5E, 0x5D, 0x5C, 0x5B, 0x5A, 0x59, 0x58  // rdi-rax
-    };
-    memcpy(tramp_ptr, pop_regs, sizeof(pop_regs));
-    tramp_ptr += sizeof(pop_regs);
-
-    // popfq
-    *tramp_ptr++ = 0x9D;
-
-    // 4. 执行原始指令
+    // 3. 执行原始指令
     memcpy(tramp_ptr, target_addr, backup_size);
     tramp_ptr += backup_size;
 
-    // 5. 跳转回原位置
+    // 4. 跳转回原位置
     // mov rax, return_addr
     *tramp_ptr++ = 0x48;
     *tramp_ptr++ = 0xB8;
@@ -124,19 +95,27 @@ void *InlineHook::CreateTrampoline(void *target_addr, size_t backup_size, void *
     return trampoline;
 }
 
-bool InlineHook::HookFunction(void *target_addr, void *hook_func)
+bool SimpleInlineHook::Install(void *target_addr, HookCallback callback)
 {
+    if (is_active)
+    {
+        return false;
+    }
+
     try
     {
+        this->target_addr = target_addr;
+        
         // 计算需要备份的指令大小
         size_t backup_size = CalculateBackupSize(target_addr);
 
         // 备份原始字节
-        std::vector<uint8_t> original_bytes(backup_size);
+        original_bytes.resize(backup_size);
+        original_size = backup_size;
         memcpy(original_bytes.data(), target_addr, backup_size);
 
-        // 创建 trampoline
-        void *trampoline = CreateTrampoline(target_addr, backup_size, hook_func);
+        // 创建trampoline
+        trampoline = CreateTrampoline(target_addr, backup_size, (void *)InternalHookHandler);
 
         // 修改目标地址的内存保护
         DWORD old_protect;
@@ -146,20 +125,20 @@ bool InlineHook::HookFunction(void *target_addr, void *hook_func)
             return false;
         }
 
-        // 写入跳转指令
+        // 写入跳转指令 (只需要12字节)
         uint8_t *target_ptr = (uint8_t *)target_addr;
 
-        // mov rax, trampoline_addr
+        // mov rax, trampoline_addr (10字节)
         *target_ptr++ = 0x48;
         *target_ptr++ = 0xB8;
         *(uint64_t *)target_ptr = (uint64_t)trampoline;
         target_ptr += 8;
 
-        // jmp rax
+        // jmp rax (2字节)
         *target_ptr++ = 0xFF;
         *target_ptr++ = 0xE0;
 
-        // 用 NOP 填充剩余空间
+        // 用NOP填充剩余空间
         for (size_t i = 12; i < backup_size; i++)
         {
             *target_ptr++ = 0x90; // NOP
@@ -168,16 +147,8 @@ bool InlineHook::HookFunction(void *target_addr, void *hook_func)
         // 恢复内存保护
         VirtualProtect(target_addr, backup_size, old_protect, &old_protect);
 
-        // 保存 hook 信息
-        HookInfo info;
-        info.target_addr = target_addr;
-        info.trampoline = trampoline;
-        info.original_bytes = std::move(original_bytes);
-        info.original_size = backup_size;
-        info.hook_function = hook_func;
-        info.is_active = true;
-
-        hooks[target_addr] = std::move(info);
+        g_user_callback = callback;
+        is_active = true;
         return true;
     }
     catch (const std::exception &e)
@@ -187,141 +158,83 @@ bool InlineHook::HookFunction(void *target_addr, void *hook_func)
     }
 }
 
-bool InlineHook::UnhookFunction(void *target_addr)
+bool SimpleInlineHook::Uninstall()
 {
-    auto it = hooks.find(target_addr);
-    if (it == hooks.end() || !it->second.is_active)
+    if (!is_active)
     {
         return false;
     }
 
-    HookInfo &info = it->second;
-
     // 修改内存保护
     DWORD old_protect;
-    if (!VirtualProtect(target_addr, info.original_size, PAGE_EXECUTE_READWRITE, &old_protect))
+    if (!VirtualProtect(target_addr, original_size, PAGE_EXECUTE_READWRITE, &old_protect))
     {
         return false;
     }
 
     // 恢复原始字节
-    memcpy(target_addr, info.original_bytes.data(), info.original_size);
+    memcpy(target_addr, original_bytes.data(), original_size);
 
     // 恢复内存保护
-    VirtualProtect(target_addr, info.original_size, old_protect, &old_protect);
+    VirtualProtect(target_addr, original_size, old_protect, &old_protect);
 
-    // 释放 trampoline
-    VirtualFree(info.trampoline, 0, MEM_RELEASE);
+    // 释放trampoline
+    if (trampoline)
+    {
+        VirtualFree(trampoline, 0, MEM_RELEASE);
+        trampoline = nullptr;
+    }
 
-    info.is_active = false;
+    is_active = false;
+    g_user_callback = nullptr;
     return true;
 }
 
-// StackAnalyzer 类实现
-uint64_t StackAnalyzer::GetArg1(const RegisterContext *ctx) 
-{ 
-    return ctx->rcx; 
-}
-
-uint64_t StackAnalyzer::GetArg2(const RegisterContext *ctx) 
-{ 
-    return ctx->rdx; 
-}
-
-uint64_t StackAnalyzer::GetArg3(const RegisterContext *ctx) 
-{ 
-    return ctx->r8; 
-}
-
-uint64_t StackAnalyzer::GetArg4(const RegisterContext *ctx) 
-{ 
-    return ctx->r9; 
-}
-
-void StackAnalyzer::PrintRegisters(const RegisterContext *ctx)
-{
-    std::cout << "=== Register Context ===" << std::endl;
-    std::cout << "RAX: 0x" << std::hex << ctx->rax << std::endl;
-    std::cout << "RBX: 0x" << std::hex << ctx->rbx << std::endl;
-    std::cout << "RCX: 0x" << std::hex << ctx->rcx << std::endl;
-    std::cout << "RDX: 0x" << std::hex << ctx->rdx << std::endl;
-    std::cout << "RSI: 0x" << std::hex << ctx->rsi << std::endl;
-    std::cout << "RDI: 0x" << std::hex << ctx->rdi << std::endl;
-    std::cout << "RBP: 0x" << std::hex << ctx->rbp << std::endl;
-    std::cout << "RSP: 0x" << std::hex << ctx->rsp_orig << std::endl;
-    std::cout << "R8:  0x" << std::hex << ctx->r8 << std::endl;
-    std::cout << "R9:  0x" << std::hex << ctx->r9 << std::endl;
-    std::cout << "R10: 0x" << std::hex << ctx->r10 << std::endl;
-    std::cout << "R11: 0x" << std::hex << ctx->r11 << std::endl;
-    std::cout << "R12: 0x" << std::hex << ctx->r12 << std::endl;
-    std::cout << "R13: 0x" << std::hex << ctx->r13 << std::endl;
-    std::cout << "R14: 0x" << std::hex << ctx->r14 << std::endl;
-    std::cout << "R15: 0x" << std::hex << ctx->r15 << std::endl;
-    std::cout << "========================" << std::endl;
-}
-
-// 内部 hook 处理函数
-extern "C" void __stdcall InternalHookHandler(void *stack_ptr)
+// 内部hook处理函数
+extern "C" void __stdcall InternalHookHandler(uint64_t rbp_value)
 {
     if (g_user_callback)
     {
-        // 栈指针指向保存的寄存器上下文
-        const StackAnalyzer::RegisterContext *ctx =
-            (const StackAnalyzer::RegisterContext *)stack_ptr;
-        g_user_callback(ctx);
+        g_user_callback(rbp_value);
     }
 }
 
-// 示例回调函数
-void MyHookCallback(const StackAnalyzer::RegisterContext *ctx)
-{
-    std::cout << "\n=== Hook Triggered ===" << std::endl;
-
-    // 打印寄存器状态
-    StackAnalyzer::PrintRegisters(ctx);
-
-    // 读取栈上的局部变量示例
-    try
-    {
-        // 读取 rbp-8 位置的 64 位值
-        uint64_t local_var1 = StackAnalyzer::ReadStackVariable<uint64_t>(ctx, -8);
-        std::cout << "Local var at [rbp-8]: 0x" << std::hex << local_var1 << std::endl;
-
-        // 读取 rbp-16 位置的 32 位值
-        uint32_t local_var2 = StackAnalyzer::ReadStackVariable<uint32_t>(ctx, -16);
-        std::cout << "Local var at [rbp-16]: 0x" << std::hex << local_var2 << std::endl;
-
-        // 读取函数参数
-        std::cout << "Arg1 (RCX): 0x" << std::hex << StackAnalyzer::GetArg1(ctx) << std::endl;
-        std::cout << "Arg2 (RDX): 0x" << std::hex << StackAnalyzer::GetArg2(ctx) << std::endl;
-    }
-    catch (const std::exception &e)
-    {
-        std::cout << "Error reading stack: " << e.what() << std::endl;
-    }
-
-    std::cout << "=====================" << std::endl;
-}
-
-// QQHookManager 类实现
-bool QQHookManager::Initialize()
+// SimpleHookManager 类实现
+bool SimpleHookManager::InstallHook(void *target_addr, HookCallback callback)
 {
     if (g_hook)
-        return true;
+    {
+        return false; // 已经安装了hook
+    }
 
     try
     {
-        g_hook = new InlineHook();
-        return true;
+        g_hook = new SimpleInlineHook();
+        return g_hook->Install(target_addr, callback);
     }
     catch (const std::exception &e)
     {
-        std::cerr << "Failed to initialize hook: " << e.what() << std::endl;
+        std::cerr << "Failed to install hook: " << e.what() << std::endl;
+        delete g_hook;
+        g_hook = nullptr;
         return false;
     }
 }
 
-void QQHookManager::Cleanup()
+bool SimpleHookManager::RemoveHook()
+{
+    if (!g_hook)
+    {
+        return false;
+    }
+
+    bool result = g_hook->Uninstall();
+    delete g_hook;
+    g_hook = nullptr;
+    return result;
+}
+
+void SimpleHookManager::Cleanup()
 {
     if (g_hook)
     {
@@ -329,20 +242,4 @@ void QQHookManager::Cleanup()
         g_hook = nullptr;
     }
     g_user_callback = nullptr;
-}
-
-bool QQHookManager::InstallHook(void *target_addr, HookCallback callback)
-{
-    if (!g_hook || !target_addr || !callback)
-        return false;
-
-    g_user_callback = callback;
-    return g_hook->HookFunction(target_addr, (void *)InternalHookHandler);
-}
-
-bool QQHookManager::RemoveHook(void *target_addr)
-{
-    if (!g_hook)
-        return false;
-    return g_hook->UnhookFunction(target_addr);
 }
