@@ -10,6 +10,7 @@
 #include "funchook.h"
 #include "helper.h"
 #include "ServiceScan.h"
+#include "HookJump.h"
 
 // NAPI类型定义和常量
 typedef void *napi_env;
@@ -329,65 +330,64 @@ void *HookedAddMsgListener(void *arg1, void *arg2, void *arg3, void *arg4)
     return original_add_msg_listener(arg1, arg2, arg3, arg4);
 }
 
-// 安全地读取内存
-bool SafeReadMemory(void *address, void *buffer, size_t size)
-{
-    __try
-    {
-        memcpy(buffer, address, size);
-        return true;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        return false;
-    }
-}
-
 // Hook群组撤回函数
-void *HookedRecallGrp(void *arg1, void *arg2, void *arg3, void *arg4, void *arg5, void *arg6, void *arg7, void *arg8)
+void RecallGroupHookCallback(const StackAnalyzer::RegisterContext *ctx)
 {
     std::wcout << L"[+] Group Recall detected" << std::endl;
 
-    // 根据JS代码分析，需要从rbp寄存器偏移获取peer和seq
     std::string peer = "819085771"; // 默认值
     uint64_t seq = 12345;           // 默认值
 
-    // 获取当前栈指针并尝试读取参数
-    void *stackPtr = GetCurrentStackPointer();
-    if (stackPtr != nullptr)
+    try
     {
-        // 尝试从栈中读取peer (rbp+0x30+0x1)
-        char peerBuffer[256] = {0};
-        char *peerPtr = (char *)((UINT_PTR)stackPtr + 0x30 + 0x1);
-        if (SafeReadMemory(peerPtr, peerBuffer, sizeof(peerBuffer) - 1))
+        // 根据 JS 代码分析：从 rbp+0x30+0x1 读取 peer
+        const uint64_t peer_offset = 0x30;
+        const uint64_t peer_ptr = ctx->rbp + peer_offset;
+
+        // 读取 peer 字符串指针并偏移1字节
+        char *peer_addr = (char *)(peer_ptr + 0x1);
+
+        // 安全读取 peer 字符串
+        size_t peer_len = strlen(peer_addr);
+        if (peer_len > 0 && peer_len < 256)
         {
-            peer = std::string(peerBuffer);
+            peer = std::string(peer_addr);
         }
 
-        // 尝试从栈中读取seq (rbp+0x80)
-        uint64_t seqValue = 0;
-        uint64_t *seqPtr = (uint64_t *)((UINT_PTR)stackPtr + 0x80);
-        if (SafeReadMemory(seqPtr, &seqValue, sizeof(seqValue)))
-        {
-            seq = seqValue;
-        }
+        // 根据 JS 代码分析：从 rbp+0x80 读取 seq
+        const uint64_t seq_offset = 0x80;
+        const uint64_t seq_ptr = ctx->rbp + seq_offset;
+        seq = *(uint64_t *)seq_ptr;
+    }
+    catch (const std::exception &e)
+    {
+        std::wcout << L"[!] Exception in RecallGroupHookCallback: "
+                   << std::wstring(e.what(), e.what() + strlen(e.what())).c_str() << std::endl;
     }
 
     std::wcout << L"peer: " << std::wstring(peer.begin(), peer.end()).c_str() << std::endl;
     std::wcout << L"seq: " << seq << std::endl;
 
+    // 发送灰色提示
     if (tsfn_ptr)
     {
         std::string tip_text = "Sequence: " + std::to_string(seq) + " has been recalled";
         CallAddGrayTip(peer, tip_text);
     }
-
-    return original_recall_grp(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8);
 }
-
 // 设置Hook
 bool SetupHooks()
 {
+    // 初始化 Hook 管理器
+    if (!QQHookManager::Initialize())
+    {
+        std::wcout << L"[!] Failed to initialize QQHookManager" << std::endl;
+        return false;
+    }
+
+    bool success = true;
+
+    // Hook add_msg_listener (保持原有的 funchook 实现)
     funchook_t *funchook = funchook_create();
     if (!funchook)
     {
@@ -395,7 +395,6 @@ bool SetupHooks()
         return false;
     }
 
-    // Hook add_msg_listener
     void *add_msg_listener_addr = (void *)((UINT_PTR)g_wrapperModule + add_msg_listener_rva);
     original_add_msg_listener = (add_msg_listener_func)add_msg_listener_addr;
 
@@ -404,36 +403,53 @@ bool SetupHooks()
     {
         std::wcout << L"[!] Failed to prepare hook for add_msg_listener: " << ret1 << std::endl;
         funchook_destroy(funchook);
-        return false;
+        success = false;
+    }
+    else
+    {
+        int install_ret = funchook_install(funchook, 0);
+        if (install_ret != 0)
+        {
+            std::wcout << L"[!] Failed to install add_msg_listener hook: " << install_ret << std::endl;
+            funchook_destroy(funchook);
+            success = false;
+        }
+        else
+        {
+            std::wcout << L"[+] Successfully hooked add_msg_listener using funchook" << std::endl;
+        }
     }
 
-    // Hook recall_grp_func
-    std::string pattern = "80 BD ?? ?? ?? ?? ?? 0F ?? ?? ?? ?? 44 88 ?? ?? ?? 44 89 ?? ?? ?? 48 8D ?? ?? 48 89 ?? ?? ?? 48 89 ?? ?? ?? 4C 89 ?? ?? ?? 4C 89 ?? ?? ?? 48 8D ?? ?? 48 89 ?? ?? ?? 48 8D ?? ?? 48 89 ?? ?? ?? 48 89 ?? ?? ?? 48 ?? ?? ?? ?? ?? ?? 48 89 ?? ?? ?? 48 ?? ?? ?? ?? ?? ?? 48 89 ?? ?? ?? 48 ?? ?? ?? ?? ?? ?? BA ?? ?? ?? ?? 41 ?? ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 89 DF 8A 9D ?? ?? ?? ?? 48 8B ?? ?? ?? ?? ?? 4C 8D ?? ?? ?? ?? ?? 48 89 F1 48 8D ?? ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B ?? ?? ?? ?? ?? 48 85 C9 4C 8D ?? ?? 74 ?? 48 8B 01 4C 89 F2 FF ??";
-    UINT64 recall_grp_func_rva = SearchRangeAddressInModule(g_wrapperModule, pattern) + 168;
+    // Hook recall_grp_func 使用新的内联 Hook
+    std::string pattern = "49 89 DF 8A 9D ?? ?? ?? ?? 48 8B ?? ?? ?? ?? ?? 4C 8D ?? ?? ?? ?? ?? 48 8D ?? ?? 4C 8D ?? ?? ?? ?? ?? 48 89 F1 4C 89 F2 E8 ?? ?? ?? ?? 48 8B ?? ?? ?? ?? ?? 48 85 C9 75 ?? 48 8B 01 48 89 FA FF ??";
+    UINT64 recall_grp_func_rva = SearchRangeAddressInModule(g_wrapperModule, pattern) + 55;
     void *recall_grp_addr = (void *)((UINT_PTR)g_wrapperModule + recall_grp_func_rva);
-    original_recall_grp = (recall_grp_func)recall_grp_addr;
 
-    int ret2 = funchook_prepare(funchook, (void **)&original_recall_grp, (void *)HookedRecallGrp);
-    if (ret2 != 0)
+    if (!QQHookManager::InstallHook(recall_grp_addr, RecallGroupHookCallback))
     {
-        std::wcout << L"[!] Failed to prepare hook for recall_grp: " << ret2 << std::endl;
-        funchook_destroy(funchook);
-        return false;
+        std::wcout << L"[!] Failed to hook recall_grp at address: "
+                   << std::hex << recall_grp_addr << std::endl;
+        success = false;
+    }
+    else
+    {
+        std::wcout << L"[+] Successfully hooked recall_grp at address: "
+                   << std::hex << recall_grp_addr << L" using InlineHook" << std::endl;
     }
 
-    // 安装hooks
-    int install_ret = funchook_install(funchook, 0);
-    if (install_ret != 0)
+    if (success)
     {
-        std::wcout << L"[!] Failed to install hooks: " << install_ret << std::endl;
-        funchook_destroy(funchook);
-        return false;
+        std::wcout << L"[+] Hooks installed successfully (mixed implementation)" << std::endl;
+    }
+    else
+    {
+        std::wcout << L"[!] Some hooks failed to install" << std::endl;
+        // 清理已安装的 hooks
+        QQHookManager::Cleanup();
     }
 
-    std::wcout << L"[+] Hooks installed successfully" << std::endl;
-    return true;
+    return success;
 }
-
 // 主初始化函数
 bool InitializeAntiRecall()
 {
@@ -510,12 +526,12 @@ bool InitializeAntiRecall()
         return false;
     }
 
-    // // 设置函数hooks
-    // if (!SetupHooks())
-    // {
-    //     std::wcout << L"[!] Failed to setup hooks" << std::endl;
-    //     return false;
-    // }
+    // 设置函数hooks
+    if (!SetupHooks())
+    {
+        std::wcout << L"[!] Failed to setup hooks" << std::endl;
+        return false;
+    }
 
     std::wcout << L"[+] Anti-recall initialization completed successfully" << std::endl;
     return true;
