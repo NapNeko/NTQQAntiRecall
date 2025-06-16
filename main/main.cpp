@@ -367,7 +367,29 @@ std::wstring getFullPath(const std::wstring &relativePath)
     return fullPath;
 }
 
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCmdShow)
+// int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCmdShow)
+// {
+//     std::wstring QQPath = getFullPath(L"QQ.exe");
+//     std::wstring QQInjectDll = getFullPath(L"NapCatWinBootHook.dll");
+
+//     // 检查文件是否存在
+//     if (GetFileAttributesW(QQPath.c_str()) == INVALID_FILE_ATTRIBUTES)
+//     {
+//         std::wcerr << L"QQ.exe not found: " << QQPath << std::endl;
+//         return 1;
+//     }
+
+//     if (GetFileAttributesW(QQInjectDll.c_str()) == INVALID_FILE_ATTRIBUTES)
+//     {
+//         std::wcerr << L"DLL not found: " << QQInjectDll << std::endl;
+//         return 1;
+//     }
+
+//     CreateSuspendedProcessWithManualMapping(QQPath.c_str(), QQInjectDll.c_str());
+//     return 0;
+// }
+
+int main(int argc, char *argv[])
 {
     std::wstring QQPath = getFullPath(L"QQ.exe");
     std::wstring QQInjectDll = getFullPath(L"NapCatWinBootHook.dll");

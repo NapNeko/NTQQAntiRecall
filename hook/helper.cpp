@@ -1,4 +1,51 @@
 #include "helper.h"
+#include <stdexcept>
+#include <iostream>
+#include <iomanip>
+#include <sstream>
+
+void PrintBytesAroundAddress(uint64_t address, int bytesBefore = 16, int bytesAfter = 16)
+{
+    std::stringstream ss;
+    ss << "Memory dump around address 0x" << std::hex << std::uppercase << address << ":\n";
+
+    uint8_t *startAddr = reinterpret_cast<uint8_t *>(address - bytesBefore);
+    uint8_t *endAddr = reinterpret_cast<uint8_t *>(address + bytesAfter);
+
+    try
+    {
+        for (uint8_t *current = startAddr; current <= endAddr; current += 16)
+        {
+            // 打印地址
+            ss << std::hex << std::uppercase << std::setfill('0') << std::setw(16)
+               << reinterpret_cast<uint64_t>(current) << ": ";
+
+            // 打印十六进制字节
+            for (int i = 0; i < 16 && (current + i) <= endAddr; ++i)
+            {
+                if (current + i == reinterpret_cast<uint8_t *>(address))
+                {
+                    ss << "[" << std::setfill('0') << std::setw(2)
+                       << static_cast<int>(*(current + i)) << "] ";
+                }
+                else
+                {
+                    ss << std::setfill('0') << std::setw(2)
+                       << static_cast<int>(*(current + i)) << " ";
+                }
+            }
+            ss << "\n";
+        }
+
+        // 输出到控制台和调试器
+        std::cout << ss.str() << std::endl;
+        OutputDebugStringA(ss.str().c_str());
+    }
+    catch (...)
+    {
+        OutputDebugStringA("Error: Cannot read memory at specified address\n");
+    }
+}
 
 std::string RemoveSpaces(const std::string &input)
 {
@@ -92,6 +139,7 @@ bool hookGroupRecall(HMODULE hModule)
         std::string pattern = "80 BD ?? ?? ?? ?? ?? 0F ?? ?? ?? ?? 44 88 ?? ?? ?? 44 89 ?? ?? ?? 48 8D ?? ?? 48 89 ?? ?? ?? 48 89 ?? ?? ?? 4C 89 ?? ?? ?? 4C 89 ?? ?? ?? 48 8D ?? ?? 48 89 ?? ?? ?? 48 8D ?? ?? 48 89 ?? ?? ?? 48 89 ?? ?? ?? 48 ?? ?? ?? ?? ?? ?? 48 89 ?? ?? ?? 48 ?? ?? ?? ?? ?? ?? 48 89 ?? ?? ?? 48 ?? ?? ?? ?? ?? ?? BA ?? ?? ?? ?? 41 ?? ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 89 DF 8A 9D ?? ?? ?? ?? 48 8B ?? ?? ?? ?? ?? 4C 8D ?? ?? ?? ?? ?? 48 89 F1 48 8D ?? ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B ?? ?? ?? ?? ?? 48 85 C9 4C 8D ?? ?? 74 ?? 48 8B 01 4C 89 F2 FF ??";
         UINT64 address = SearchRangeAddressInModule(hModule, pattern);
         address = address + 168;
+        PrintBytesAroundAddress(address);
         DWORD OldProtect = 0;
         VirtualProtect((LPVOID)address, 1, PAGE_EXECUTE_READWRITE, &OldProtect);
         memcpy((LPVOID)address, patchCode, 1);

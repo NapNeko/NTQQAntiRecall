@@ -478,7 +478,7 @@ bool InitializeAntiRecall()
         return false;
     }
     std::wcout << L"[+] Found addKernelMsgListener at address: " << std::hex << addMsgListenerIt->second << std::endl;
-    add_msg_listener_rva = addMsgListenerIt->second;
+    add_msg_listener_rva = addMsgListenerIt->second - analyzer.get_image_base();
 
     // 找到addLocalJsonGrayTipMsg方法
     auto addLocalJsonGrayTipMsgIt = std::find_if(it->methods.begin(), it->methods.end(),
@@ -492,15 +492,17 @@ bool InitializeAntiRecall()
         return false;
     }
     std::wcout << L"[+] Found addLocalJsonGrayTipMsg at address: " << std::hex << addLocalJsonGrayTipMsgIt->second << std::endl;
-    add_local_gray_tip_rva = addLocalJsonGrayTipMsgIt->second;
+    add_local_gray_tip_rva = static_cast<DWORD>(addLocalJsonGrayTipMsgIt->second) - analyzer.get_image_base();
 
+    std::wcout << L"[+] add_local_gray_tip_rva: " << std::hex << add_local_gray_tip_rva << std::endl;
+    std::wcout << L"[+] add_msg_listener_rva: " << std::hex << add_msg_listener_rva << std::endl;
     // 初始化NAPI函数
     if (!InitializeNAPIFunctions())
     {
         std::wcout << L"[!] Failed to initialize NAPI functions" << std::endl;
         return false;
     }
-
+    std::wcout << L"[+] NAPI functions initialized successfully" << std::endl;
     // 应用内存补丁
     if (!hookGroupRecall(g_wrapperModule))
     {
@@ -508,12 +510,12 @@ bool InitializeAntiRecall()
         return false;
     }
 
-    // 设置函数hooks
-    if (!SetupHooks())
-    {
-        std::wcout << L"[!] Failed to setup hooks" << std::endl;
-        return false;
-    }
+    // // 设置函数hooks
+    // if (!SetupHooks())
+    // {
+    //     std::wcout << L"[!] Failed to setup hooks" << std::endl;
+    //     return false;
+    // }
 
     std::wcout << L"[+] Anti-recall initialization completed successfully" << std::endl;
     return true;
@@ -587,7 +589,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
     {
         g_selfModule = hModule;
         DisableThreadLibraryCalls(hModule);
-
+        AttachConsole(ATTACH_PARENT_PROCESS);
+        // 重打开输出流
+        freopen("CONOUT$", "w", stdout);
+        freopen("CONOUT$", "w", stderr);
         HANDLE hThread = CreateThread(NULL, 0, CheckModuleThread, NULL, 0, NULL);
         if (hThread)
         {
