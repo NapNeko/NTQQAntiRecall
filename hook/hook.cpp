@@ -11,6 +11,7 @@
 #include "helper.h"
 #include "ServiceScan.h"
 #include "HookJump.h"
+#include "HookHelper.h"
 
 // NAPI类型定义和常量
 typedef void *napi_env;
@@ -60,6 +61,23 @@ typedef enum
 
 typedef void (*napi_finalize)(napi_env env, void *finalize_data, void *finalize_hint);
 typedef void (*napi_threadsafe_function_call_js)(napi_env env, napi_value js_callback, void *context, void *data);
+typedef __int64(__fastcall *grp_recall_listener_func)(
+    _int64 a1,
+    unsigned int a2,
+    int a3,
+    int a4,
+    __int64 a5,
+    char *Str,
+    __int64 a7,
+    __int64 a8,
+    __int64 a9,
+    __int64 a10,
+    __int64 a11,
+    __int64 a12,
+    __int64 a13,
+    __int64 a14,
+    char a15,
+    char a16);
 
 #define NAPI_AUTO_LENGTH SIZE_MAX
 
@@ -72,6 +90,7 @@ napi_threadsafe_function tsfn_ptr = nullptr;
 napi_ref msgService_Js_This_Ref = nullptr;
 HMODULE g_wrapperModule = nullptr;
 HMODULE g_qqntModule = nullptr;
+grp_recall_listener_func original_grp_recall_listener = nullptr;
 
 // NAPI函数指针定义
 typedef napi_status (*napi_create_threadsafe_function_func)(
@@ -330,117 +349,85 @@ void *HookedAddMsgListener(void *arg1, void *arg2, void *arg3, void *arg4)
     return original_add_msg_listener(arg1, arg2, arg3, arg4);
 }
 
-// 安全读取字符串的辅助函数
-std::string SafeReadString(uint64_t address, size_t max_length = 256)
+__int64 __fastcall HookedGrpRecallListener(
+    _int64 a1,
+    unsigned int a2,
+    int a3,
+    int a4,
+    __int64 a5,
+    char *Str,
+    __int64 a7,
+    __int64 a8,
+    __int64 rd,
+    __int64 seq,
+    __int64 a11,
+    __int64 a12,
+    __int64 a13,
+    __int64 a14,
+    char a15,
+    char a16)
 {
-    if (address == 0)
-        return "";
-
-    // 检查内存是否可读
-    MEMORY_BASIC_INFORMATION mbi;
-    if (VirtualQuery((LPCVOID)address, &mbi, sizeof(mbi)) == 0)
-    {
-        return "";
-    }
-
-    if (!(mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)))
-    {
-        return "";
-    }
-
-    try
-    {
-        char *str_ptr = (char *)address;
-        size_t len = strnlen(str_ptr, max_length);
-        if (len > 0 && len < max_length)
-        {
-            return std::string(str_ptr, len);
-        }
-    }
-    catch (...)
-    {
-        // 捕获任何访问异常
-    }
-
-    return "";
-}
-
-// 安全读取64位整数的辅助函数
-uint64_t SafeReadUInt64(uint64_t address)
-{
-    if (address == 0)
-        return 0;
-
-    // 检查内存是否可读
-    MEMORY_BASIC_INFORMATION mbi;
-    if (VirtualQuery((LPCVOID)address, &mbi, sizeof(mbi)) == 0)
-    {
-        return 0;
-    }
-
-    if (!(mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)))
-    {
-        return 0;
-    }
-
-    try
-    {
-        return *(uint64_t *)address;
-    }
-    catch (...)
-    {
-        return 0;
-    }
-}
-
-// Hook群组撤回函数
-void RecallGroupHookCallback(uint64_t rbp)
-{
-    std::wcout << L"[+] Group Recall detected" << std::endl;
-
-    std::string peer = "819085771"; // 默认值
-    uint64_t seq = 12345;           // 默认值
-
-    try
-    {
-        // 根据JS代码：从 rbp+0x30+0x1 读取 peer
-        const uint64_t peer_str_addr = rbp + 0x30 + 0x1;
-        std::wcout << L"[Debug] Reading peer from address: 0x" << std::hex << peer_str_addr << std::endl;
-        std::string peer_result = SafeReadString(peer_str_addr);
-        if (!peer_result.empty())
-        {
-            peer = peer_result;
-            std::wcout << L"[Debug] Successfully read peer: "
-                       << std::wstring(peer.begin(), peer.end()).c_str() << std::endl;
-        }
-
-        // 根据JS代码：从 rbp+0x80 读取 seq
-        const uint64_t seq_addr = rbp + 0x80;
-        uint64_t seq_result = SafeReadUInt64(seq_addr);
-        if (seq_result != 0)
-        {
-            seq = seq_result;
-            std::wcout << L"[Debug] Successfully read seq: " << seq << std::endl;
-        }
-    }
-    catch (...)
-    {
-        std::wcout << L"[!] Exception in RecallGroupHookCallback" << std::endl;
-    }
-
-    // 发送灰色提示
+    std::wcout << L"[+] HookedGrpRecallListener called" << std::endl;
+    // 调用原始函数
+    // 打印a8偏移0x1
+    char *peer = (char *)((uintptr_t)a8 + 0x1);
+    // a9
+    std::cout << "[Debug] Str: " << peer << std::endl;
+    UINT64 seq_value = (UINT64)seq;
+    std::cout << "[Debug] seq: " << seq_value << std::endl;
     if (tsfn_ptr)
     {
-        std::string tip_text = "Sequence: " + std::to_string(seq) + " has been recalled";
+        std::string tip_text = "Sequence: " + std::to_string(seq_value) + " has been recalled";
         CallAddGrayTip(peer, tip_text);
     }
+    // return original_grp_recall_listener(a1, a2, a3, a4, a5, Str, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16);
+    return 0;
 }
+// Hook群组撤回函数
+// void RecallGroupHookCallback(uint64_t rbp)
+// {
+//     std::wcout << L"[+] Group Recall detected" << std::endl;
+
+//     std::string peer = "819085771"; // 默认值
+//     uint64_t seq = 12345;           // 默认值
+
+//     try
+//     {
+//         // 根据JS代码：从 rbp+0x30+0x1 读取 peer
+//         const uint64_t peer_str_addr = rbp + 0x30 + 0x1;
+//         std::wcout << L"[Debug] Reading peer from address: 0x" << std::hex << peer_str_addr << std::endl;
+//         std::string peer_result = SafeReadString(peer_str_addr);
+//         if (!peer_result.empty())
+//         {
+//             peer = peer_result;
+//             std::wcout << L"[Debug] Successfully read peer: "
+//                        << std::wstring(peer.begin(), peer.end()).c_str() << std::endl;
+//         }
+
+//         // 根据JS代码：从 rbp+0x80 读取 seq
+//         const uint64_t seq_addr = rbp + 0x80;
+//         uint64_t seq_result = SafeReadUInt64(seq_addr);
+//         if (seq_result != 0)
+//         {
+//             seq = seq_result;
+//             std::wcout << L"[Debug] Successfully read seq: " << seq << std::endl;
+//         }
+//     }
+//     catch (...)
+//     {
+//         std::wcout << L"[!] Exception in RecallGroupHookCallback" << std::endl;
+//     }
+
+//     // 发送灰色提示
+//     if (tsfn_ptr)
+//     {
+//         std::string tip_text = "Sequence: " + std::to_string(seq) + " has been recalled";
+//         CallAddGrayTip(peer, tip_text);
+//     }
+// }
 // 设置Hook
 bool SetupHooks()
 {
-
-    bool success = true;
-
     funchook_t *funchook = funchook_create();
     if (!funchook)
     {
@@ -448,6 +435,7 @@ bool SetupHooks()
         return false;
     }
 
+    // Hook add_msg_listener
     void *add_msg_listener_addr = (void *)((UINT_PTR)g_wrapperModule + add_msg_listener_rva);
     original_add_msg_listener = (add_msg_listener_func)add_msg_listener_addr;
 
@@ -456,45 +444,39 @@ bool SetupHooks()
     {
         std::wcout << L"[!] Failed to prepare hook for add_msg_listener: " << ret1 << std::endl;
         funchook_destroy(funchook);
-        success = false;
-    }
-    else
-    {
-        int install_ret = funchook_install(funchook, 0);
-        if (install_ret != 0)
-        {
-            std::wcout << L"[!] Failed to install add_msg_listener hook: " << install_ret << std::endl;
-            funchook_destroy(funchook);
-            success = false;
-        }
-        else
-        {
-            std::wcout << L"[+] Successfully hooked add_msg_listener using funchook" << std::endl;
-        }
+        return false;
     }
 
     // Hook recall_grp_func
     std::string pattern = "89 7C ?? ?? 4C 89 ?? ?? ?? 80 BD ?? ?? ?? ?? ?? 8A 85 ?? ?? ?? ?? 88 44 ?? ?? 0F ?? ?? ?? ?? 48 8D ?? ?? ?? ?? ?? 48 89 ?? ?? ?? 4C 89 ?? ?? ?? 4C 89 ?? ?? ?? 48 8D ?? ?? ?? ?? ?? 48 89 ?? ?? ?? 48 8D ?? ?? ?? ?? ?? 48 89 ?? ?? ?? 48 8D ?? ?? 48 89 ?? ?? ?? 48 ?? ?? ?? ?? ?? ?? 48 89 ?? ?? ?? 48 ?? ?? ?? ?? ?? ?? 48 89 ?? ?? ?? 48 ?? ?? ?? ?? ?? ?? 45 89 F5 44 89 F2 41 ?? ?? ?? ?? ?? E8 ?? ?? ?? ??";
     UINT64 recall_grp_absolute_addr = SearchRangeAddressInModule(g_wrapperModule, pattern);
-    void *recall_grp_addr = (void *)(recall_grp_absolute_addr + 55);
-    if (!SimpleHookManager::InstallHook(recall_grp_addr, RecallGroupHookCallback))
+    void *recall_grp_addr = (void *)(recall_grp_absolute_addr + 129); // E8 ?? ?? ?? ??
+    void *grp_recall_listener = GetCallAddress(reinterpret_cast<uint8_t *>(recall_grp_addr));
+    void *grp_recall_listener_rva = (void *)((UINT_PTR)grp_recall_listener - (UINT_PTR)g_wrapperModule);
+    std::wcout << L"[+] Found recall_grp_func at address: " << std::hex << grp_recall_listener_rva << std::endl;
+
+    original_grp_recall_listener = (grp_recall_listener_func)grp_recall_listener;
+    int ret2 = funchook_prepare(funchook, (void **)&original_grp_recall_listener, (void *)HookedGrpRecallListener);
+    if (ret2 != 0)
     {
-        std::wcout << L"[!] Failed to hook recall_grp at address: "
-                   << std::hex << recall_grp_addr << std::endl;
-        success = false;
+        std::wcout << L"[!] Failed to prepare hook for grp_recall_listener: " << ret2 << std::endl;
+        funchook_destroy(funchook);
+        return false;
+    }
+
+    int install_ret = funchook_install(funchook, 0);
+    if (install_ret != 0)
+    {
+        std::wcout << L"[!] Failed to install hooks: " << install_ret << std::endl;
+        funchook_destroy(funchook);
+        return false;
     }
     else
     {
-        std::wcout << L"[+] Successfully hooked recall_grp at address: "
-                   << std::hex << recall_grp_addr << L" using InlineHook" << std::endl;
+        std::wcout << L"[+] Successfully hooked add_msg_listener and grp_recall_listener using funchook" << std::endl;
     }
 
-    if (success)
-    {
-        std::wcout << L"[+] Hooks installed successfully (mixed implementation)" << std::endl;
-    }
-
-    return success;
+    return true;
 }
 // 主初始化函数
 bool InitializeAntiRecall()
