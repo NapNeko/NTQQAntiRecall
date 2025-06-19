@@ -13,6 +13,8 @@ Windows QQ 9.9.19 34740 已测试 (无撤回提示)
 
 Windows QQ 9.9.19 35951 已测试 (无撤回提示 带撤回提示)
 
+![QQ_1750319148501](https://github.com/user-attachments/assets/aa9c1398-a193-4286-8704-51a7cbfb4566)
+
 ## 使用介绍
 
 1. 下载release压缩包
