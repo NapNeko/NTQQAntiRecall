@@ -20,7 +20,8 @@ typedef void *napi_callback_info;
 typedef void *napi_ref;
 typedef void *napi_threadsafe_function;
 typedef void *napi_callback;
-
+// 定义NODE AUTO LENGTH
+#define NAPI_AUTO_LENGTH SIZE_MAX
 typedef enum
 {
     napi_ok,
@@ -149,6 +150,8 @@ recall_grp_func original_recall_grp = nullptr;
 struct CallbackData
 {
     std::string peerUid;
+    std::string origin_sender_uid;
+    std::string operator_uid;
     UINT64 seq;
 };
 
@@ -198,7 +201,7 @@ bool InitializeNAPIFunctions()
 }
 
 // 调用添加灰色提示
-void CallAddGrayTip(const std::string &peerUid, UINT64 seq)
+void CallAddGrayTip(const std::string &peerUid, UINT64 seq, const char *origin_sender_uid, const char *operator_uid)
 {
     if (!tsfn_ptr)
     {
@@ -210,6 +213,8 @@ void CallAddGrayTip(const std::string &peerUid, UINT64 seq)
     CallbackData *data = new CallbackData();
     data->peerUid = peerUid;
     data->seq = seq;
+    data->origin_sender_uid = origin_sender_uid;
+    data->operator_uid = operator_uid;
 
     napi_status status = napi_call_threadsafe_function_ptr(tsfn_ptr, data, napi_tsfn_blocking);
     if (status != napi_ok)
@@ -225,7 +230,6 @@ void ThreadSafeFunctionCallback(napi_env env, napi_value js_callback, void *cont
     CallbackData *callbackData = static_cast<CallbackData *>(data);
     std::string groupId = "819085771";
     std::string tip_text = "Frida Hook QQNT By NapCat";
-
     if (callbackData)
     {
         groupId = callbackData->peerUid;
@@ -261,9 +265,9 @@ void ThreadSafeFunctionCallback(napi_env env, napi_value js_callback, void *cont
     napi_set_named_property_ptr(env, obj2, "busiId", busiId);
 
     // jsonStr
-    std::string jsonStr = R"({"align":"center","items":[{"txt":")" + tip_text + R"(","type":"nor"},{"type":"url","txt":"msg","col":"3","local_jp":58,"param":{"seq":)" + std::to_string(callbackData->seq) + R"(}}]})";
+    std::string jsonStr = R"({"align":"center","items":[{"col":"1","nm":"","type":"qq","uid":")" + std::string(callbackData->operator_uid) + R"("},{"txt":"尝试撤回了","type":"nor"},{"col":"1","nm":"","type":"qq","uid":")" + std::string(callbackData->origin_sender_uid) + R"("},{"txt":"的消息[seq=)" + std::to_string(callbackData->seq) + R"(]","type":"nor"}]})";
     napi_value jsonStrValue;
-    napi_create_string_utf8_ptr(env, jsonStr.c_str(), jsonStr.length(), &jsonStrValue);
+    napi_create_string_utf8_ptr(env, jsonStr.c_str(), NAPI_AUTO_LENGTH, &jsonStrValue);
     napi_set_named_property_ptr(env, obj2, "jsonStr", jsonStrValue);
 
     // recentAbstract
@@ -349,6 +353,29 @@ void *HookedAddMsgListener(void *arg1, void *arg2, void *arg3, void *arg4)
     return original_add_msg_listener(arg1, arg2, arg3, arg4);
 }
 
+char *readgccstring(UINT64 ptr)
+{
+    if (ptr == 0)
+    {
+        return nullptr;
+    }
+
+    // 读取第一个字节并检查字符串类型标志
+    uint8_t string_type = *reinterpret_cast<uint8_t *>(ptr) & 0x1;
+
+    if (string_type == 0)
+    {
+        // 短字符串：直接从 ptr+1 位置读取
+        return reinterpret_cast<char *>(ptr + 1);
+    }
+    else
+    {
+        // 长字符串：从 ptr+16 位置读取指针，然后从该指针指向的位置读取字符串
+        UINT64 *ptr_to_str = reinterpret_cast<UINT64 *>(ptr + 16);
+        return reinterpret_cast<char *>(*ptr_to_str);
+    }
+}
+
 __int64 __fastcall HookedGrpRecallListener(
     _int64 a1,
     unsigned int a2,
@@ -368,62 +395,20 @@ __int64 __fastcall HookedGrpRecallListener(
     char a16)
 {
     std::wcout << L"[+] HookedGrpRecallListener called" << std::endl;
-    // 调用原始函数
-    // 打印a8偏移0x1
-    char *peer = (char *)((uintptr_t)a8 + 0x1);
+    const char *origin_sender_uid = readgccstring(a7);
+    const char *peer = readgccstring(a8);
+    const char *operator_uid = readgccstring(a13);
     // a9
     std::cout << "[Debug] Str: " << peer << std::endl;
-    UINT64 seq_value = (UINT64)seq;
-    std::cout << "[Debug] seq: " << seq_value << std::endl;
+    std::cout << "[Debug] seq: " << seq << std::endl;
     if (tsfn_ptr)
     {
-        CallAddGrayTip(peer, seq_value);
+        CallAddGrayTip(peer, seq, origin_sender_uid, operator_uid);
     }
+
     // return original_grp_recall_listener(a1, a2, a3, a4, a5, Str, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16);
     return 0;
 }
-// Hook群组撤回函数
-// void RecallGroupHookCallback(uint64_t rbp)
-// {
-//     std::wcout << L"[+] Group Recall detected" << std::endl;
-
-//     std::string peer = "819085771"; // 默认值
-//     uint64_t seq = 12345;           // 默认值
-
-//     try
-//     {
-//         // 根据JS代码：从 rbp+0x30+0x1 读取 peer
-//         const uint64_t peer_str_addr = rbp + 0x30 + 0x1;
-//         std::wcout << L"[Debug] Reading peer from address: 0x" << std::hex << peer_str_addr << std::endl;
-//         std::string peer_result = SafeReadString(peer_str_addr);
-//         if (!peer_result.empty())
-//         {
-//             peer = peer_result;
-//             std::wcout << L"[Debug] Successfully read peer: "
-//                        << std::wstring(peer.begin(), peer.end()).c_str() << std::endl;
-//         }
-
-//         // 根据JS代码：从 rbp+0x80 读取 seq
-//         const uint64_t seq_addr = rbp + 0x80;
-//         uint64_t seq_result = SafeReadUInt64(seq_addr);
-//         if (seq_result != 0)
-//         {
-//             seq = seq_result;
-//             std::wcout << L"[Debug] Successfully read seq: " << seq << std::endl;
-//         }
-//     }
-//     catch (...)
-//     {
-//         std::wcout << L"[!] Exception in RecallGroupHookCallback" << std::endl;
-//     }
-
-//     // 发送灰色提示
-//     if (tsfn_ptr)
-//     {
-//         std::string tip_text = "Sequence: " + std::to_string(seq) + " has been recalled";
-//         CallAddGrayTip(peer, tip_text);
-//     }
-// }
 // 设置Hook
 bool SetupHooks()
 {
